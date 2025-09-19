@@ -1,0 +1,20 @@
+[package]
+name = "easl_cli"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "easl"
+path = "src/main.rs"
+
+[dependencies]
+easl = { git = "https://github.com/Ella-Hoeppner/easl" }
+hollow = { git = "https://github.com/Ella-Hoeppner/hollow-rs" }
+wgpu = "24.0.1"
+clap = { version = "4.0", features = ["derive"] }
+
+[profile.release]
+# debug = true
+
+# strip = true
+# lto = true

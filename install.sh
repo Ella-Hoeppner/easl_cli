@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set -e
+cargo build --release
+mkdir -p bin
+cp target/release/easl bin/easl

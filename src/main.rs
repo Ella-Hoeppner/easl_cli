@@ -1,0 +1,233 @@
+mod app;
+
+use clap::{Parser, Subcommand};
+use easl::{
+  compile_easl_source_to_wgsl, format_easl_source, get_easl_program_info,
+};
+use hollow::sketch::Sketch;
+use std::fs;
+use std::path::PathBuf;
+
+use crate::app::{RunConfig, UserSketch};
+
+#[derive(Parser)]
+#[command(name = "easl")]
+#[command(about = "Easl compiler")]
+struct Cli {
+  #[command(subcommand)]
+  command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+  Compile {
+    input: PathBuf,
+
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+  },
+  Check {
+    input: PathBuf,
+  },
+  Format {
+    input: PathBuf,
+
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+  },
+  Run {
+    input: PathBuf,
+
+    #[arg(short, long)]
+    fragment: Option<String>,
+
+    #[arg(short, long)]
+    vertex: Option<String>,
+
+    #[arg(long)]
+    triangles: Option<u32>,
+  },
+}
+
+fn read_source(input: &PathBuf) -> Result<String, String> {
+  fs::read_to_string(&input).map_err(|e| {
+    format!(
+      "Error: Failed to read input file {}\n{}",
+      input.display(),
+      e
+    )
+  })
+}
+
+fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+  let easl_source = read_source(&input)?;
+  println!("Compiling {}...", input.display());
+  match compile_easl_source_to_wgsl(&easl_source) {
+    Ok(wgsl) => {
+      let output_path = output.unwrap_or_else(|| {
+        let mut output_path = input.clone();
+        output_path.set_extension("wgsl");
+        output_path
+      });
+
+      fs::write(&output_path, wgsl).map_err(|e| {
+        format!(
+          "Error: Failed to write output file {}\n{}",
+          output_path.display(),
+          e
+        )
+      })?;
+
+      println!("Finished: {}", output_path.display());
+    }
+    Err(error_log) => {
+      println!("{error_log:#?}");
+    }
+  }
+  Ok(())
+}
+
+fn check_file(input: PathBuf) -> Result<(), String> {
+  let easl_source = read_source(&input)?;
+  println!("Typechecking {}...", input.display());
+  match compile_easl_source_to_wgsl(&easl_source) {
+    Ok(_) => {
+      println!("Program typechecked successfully!");
+    }
+    Err(error_log) => {
+      println!("{error_log:#?}");
+    }
+  }
+  Ok(())
+}
+
+fn format_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+  let easl_source = read_source(&input)?;
+  println!("Formatting {}...", input.display());
+  match format_easl_source(&easl_source) {
+    Ok(formatted) => {
+      let output_path = output.unwrap_or_else(|| input.clone());
+
+      fs::write(&output_path, formatted).map_err(|e| {
+        format!(
+          "Error: Failed to write output file {}\n{}",
+          output_path.display(),
+          e
+        )
+      })?;
+
+      println!("Formatted: {}", output_path.display());
+    }
+    Err(error_log) => {
+      println!("{error_log:#?}");
+    }
+  }
+  Ok(())
+}
+
+fn run_file(
+  input: PathBuf,
+  fragment: Option<String>,
+  vertex: Option<String>,
+  triangles: Option<u32>,
+) -> Result<(), String> {
+  let easl_source = read_source(&input)?;
+  println!("Running {}...", input.display());
+  match compile_easl_source_to_wgsl(&easl_source) {
+    Ok(wgsl) => {
+      let program_info = get_easl_program_info(&easl_source).unwrap();
+      let fragment_entry = if let Some(fragment) = fragment {
+        if program_info.fragment_entries.contains(&fragment) {
+          fragment
+        } else {
+          return Err(format!("No fragment entry point named '{fragment}'"));
+        }
+      } else {
+        match program_info.fragment_entries.len() {
+          0 => return Err(format!("No fragment entry point found")),
+          1 => program_info.fragment_entries[0].clone(),
+          _ => {
+            return Err(format!(
+              "Multiple fragment entry points found. Use '--fragment' to \
+              specify one."
+            ));
+          }
+        }
+      };
+      let vertex_entry = if let Some(vertex) = vertex {
+        if program_info.vertex_entries.contains(&vertex) {
+          vertex
+        } else {
+          return Err(format!("No vertex entry point named '{vertex}'"));
+        }
+      } else {
+        match program_info.vertex_entries.len() {
+          0 => return Err(format!("No vertex entry point found")),
+          1 => program_info.vertex_entries[0].clone(),
+          _ => {
+            return Err(format!(
+              "Multiple fragment entry points found. Use '--fragment' to \
+              specify one."
+            ));
+          }
+        }
+      };
+      let triangles = if let Some(triangles) = triangles {
+        triangles
+      } else {
+        if let Some(triangles) =
+          program_info.global_vars.iter().find_map(|var| {
+            if var.uniform_info.is_none()
+              && var.name == "triangles"
+              && let Some(value) = &var.value
+              && let Ok(triangles) = value.parse::<u32>()
+            {
+              Some(triangles)
+            } else {
+              None
+            }
+          })
+        {
+          triangles
+        } else {
+          return Err(format!(
+            "No triangle count specified. Specify it with the `--triangles` \
+              flag or by defining it in your source file, e.g. \
+              '(def triangles: u32 5)'"
+          ));
+        }
+      };
+      UserSketch::new(
+        wgsl,
+        RunConfig {
+          fragment_entry,
+          vertex_entry,
+          triangles,
+        },
+      )
+      .run();
+    }
+    Err(error_log) => {
+      println!("{error_log:#?}");
+    }
+  }
+  Ok(())
+}
+
+fn main() {
+  let cli = Cli::parse();
+  if let Err(e) = match cli.command {
+    Command::Compile { input, output } => compile_file(input, output),
+    Command::Check { input } => check_file(input),
+    Command::Format { input, output } => format_file(input, output),
+    Command::Run {
+      input,
+      fragment,
+      vertex,
+      triangles,
+    } => run_file(input, fragment, vertex, triangles),
+  } {
+    eprintln!("{e}");
+    std::process::exit(1);
+  }
+}

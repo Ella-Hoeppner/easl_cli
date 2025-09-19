@@ -1,0 +1,30 @@
+(struct VertexOutput
+  @{builtin position} vertex-pos: vec4f)
+
+(def triangles: u32
+     8)
+
+@vertex
+(defn vertex [@{builtin vertex-index}
+              vertex-index: u32]: VertexOutput
+  (let [square-index (/ vertex-index 6)
+        triangle-vertex-index (% vertex-index 6)
+        square-pos (match square-index
+                     0 (vec2f -0.25 -0.25)
+                     1 (vec2f -0.25 0.25)
+                     2 (vec2f 0.25 -0.25)
+                     _ (vec2f 0.25 0.25))
+        corner-pos (match triangle-vertex-index
+                     0 (vec2f -1. -1.)
+                     1 (vec2f -1. 1.)
+                     2 (vec2f 1. -1.)
+                     3 (vec2f 1. 1.)
+                     4 (vec2f 1. -1.)
+                     _ (vec2f -1. 1.))]
+    (VertexOutput (vec4f (+ square-pos (* corner-pos 0.1))
+                         0.
+                         1.))))
+
+@fragment
+(defn fragment [in: VertexOutput]: @{location 0} vec4f
+  (vec4f 1.))
