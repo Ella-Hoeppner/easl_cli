@@ -59,10 +59,29 @@ fn read_source(input: &PathBuf) -> Result<String, String> {
   })
 }
 
+fn try_compile_easl(easl_source: &str) -> Result<String, String> {
+  match compile_easl_source_to_wgsl(easl_source) {
+    Ok(Ok(wgsl)) => Ok(wgsl),
+    Ok(Err((document, errors))) => Err(format!(
+      "Compilation failed due to errors:\n\n{}",
+      errors.describe(&document)
+    )),
+    Err(mut failed_document) => Err(format!(
+      "Compilation failed due to parsing error:\n\n{}",
+      failed_document
+        .parsing_failure
+        .take()
+        .unwrap()
+        .describe(&failed_document)
+    )),
+  }
+}
+
 fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   let easl_source = read_source(&input)?;
+
   println!("Compiling {}...", input.display());
-  match compile_easl_source_to_wgsl(&easl_source) {
+  match try_compile_easl(&easl_source) {
     Ok(wgsl) => {
       let output_path = output.unwrap_or_else(|| {
         let mut output_path = input.clone();
@@ -79,12 +98,10 @@ fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
       })?;
 
       println!("Finished: {}", output_path.display());
+      Ok(())
     }
-    Err(error_log) => {
-      println!("{error_log:#?}");
-    }
+    Err(e) => Err(e),
   }
-  Ok(())
 }
 
 fn check_file(input: PathBuf) -> Result<(), String> {
@@ -104,24 +121,16 @@ fn check_file(input: PathBuf) -> Result<(), String> {
 fn format_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   let easl_source = read_source(&input)?;
   println!("Formatting {}...", input.display());
-  match format_easl_source(&easl_source) {
-    Ok(formatted) => {
-      let output_path = output.unwrap_or_else(|| input.clone());
-
-      fs::write(&output_path, formatted).map_err(|e| {
-        format!(
-          "Error: Failed to write output file {}\n{}",
-          output_path.display(),
-          e
-        )
-      })?;
-
-      println!("Formatted: {}", output_path.display());
-    }
-    Err(error_log) => {
-      println!("{error_log:#?}");
-    }
-  }
+  let formatted = format_easl_source(&easl_source);
+  let output_path = output.unwrap_or_else(|| input.clone());
+  fs::write(&output_path, formatted).map_err(|e| {
+    format!(
+      "Error: Failed to write output file {}\n{}",
+      output_path.display(),
+      e
+    )
+  })?;
+  println!("Formatted: {}", output_path.display());
   Ok(())
 }
 
@@ -133,9 +142,9 @@ fn run_file(
 ) -> Result<(), String> {
   let easl_source = read_source(&input)?;
   println!("Running {}...", input.display());
-  match compile_easl_source_to_wgsl(&easl_source) {
+  match try_compile_easl(&easl_source) {
     Ok(wgsl) => {
-      let program_info = get_easl_program_info(&easl_source).unwrap();
+      let program_info = get_easl_program_info(&easl_source).unwrap().unwrap();
       let fragment_entry = if let Some(fragment) = fragment {
         if program_info.fragment_entries.contains(&fragment) {
           fragment
@@ -206,12 +215,10 @@ fn run_file(
         },
       )
       .run();
+      Ok(())
     }
-    Err(error_log) => {
-      println!("{error_log:#?}");
-    }
+    Err(e) => Err(e),
   }
-  Ok(())
 }
 
 fn main() {

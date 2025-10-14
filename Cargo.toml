@@ -10,7 +10,7 @@ path = "src/main.rs"
 [dependencies]
 easl = { git = "https://github.com/Ella-Hoeppner/easl" }
 hollow = { git = "https://github.com/Ella-Hoeppner/hollow-rs" }
-wgpu = "24.0.1"
+wgpu = "27.0"
 clap = { version = "4.0", features = ["derive"] }
 
 [profile.release]
