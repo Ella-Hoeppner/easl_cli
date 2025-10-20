@@ -20,31 +20,60 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+  /// Compile a .easl file to .wgsl
   Compile {
+    /// Path of the .easl file to compile
     input: PathBuf,
 
+    /// Output file path, defaults to input file with .wgsl extension
     #[arg(short, long)]
     output: Option<PathBuf>,
   },
+  /// Typecheck a .easl file without comiling
   Check {
+    /// Path of the .easl file to check
     input: PathBuf,
   },
+  /// Format a .easl file
   Format {
+    /// Path of the .easl file to format
     input: PathBuf,
 
+    /// Output file path, defaults to same as input
     #[arg(short, long)]
     output: Option<PathBuf>,
   },
+  /// Run a .easl file as a standalone application
   Run {
+    /// Path of the .easl file to run
     input: PathBuf,
 
-    #[arg(short, long)]
+    #[arg(
+      short,
+      long,
+      long_help = "Name of the fragment entry point.\n\
+                   Must be a function marked as @fragment.\n\
+                   May be omitted if file has only one fragment entry."
+    )]
     fragment: Option<String>,
 
-    #[arg(short, long)]
+    #[arg(
+      short,
+      long,
+      long_help = "Name of the vertex entry point.\n\
+                   Must be a function marked as @vertex.\n\
+                   May be omitted if file has only one vertex entry."
+    )]
     vertex: Option<String>,
 
-    #[arg(long)]
+    #[arg(
+      short,
+      long,
+      long_help = "The number of triangles to render.\n\
+                   Must be a positive integer.\n\
+                   May be omitted if specified in the file\n\
+                   e.g. `(def triangles: u32 100)`"
+    )]
     triangles: Option<u32>,
   },
 }
@@ -66,14 +95,17 @@ fn try_compile_easl(easl_source: &str) -> Result<String, String> {
       "Compilation failed due to errors:\n\n{}",
       errors.describe(&document)
     )),
-    Err(mut failed_document) => Err(format!(
-      "Compilation failed due to parsing error:\n\n{}",
-      failed_document
-        .parsing_failure
-        .take()
-        .unwrap()
-        .describe(&failed_document)
-    )),
+    Err(mut failed_document) => {
+      Err(format!("Compilation failed due to parsing error:\n\n{}", {
+        let mut errors = vec![];
+        std::mem::swap(&mut errors, &mut failed_document.parsing_failures);
+        errors
+          .into_iter()
+          .map(|err| err.describe(&failed_document))
+          .collect::<Vec<String>>()
+          .join("\n\n")
+      }))
+    }
   }
 }
 
