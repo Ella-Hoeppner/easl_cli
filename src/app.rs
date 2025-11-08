@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use hollow::{
   sketch::{FrameData, Sketch},
   wgpu::{
@@ -7,6 +9,7 @@ use hollow::{
 use wgpu::{RenderPipeline, ShaderModuleDescriptor, TextureView};
 
 pub(crate) struct RunConfig {
+  pub(crate) wgsl: String,
   pub(crate) fragment_entry: String,
   pub(crate) vertex_entry: String,
   pub(crate) triangles: u32,
@@ -17,24 +20,45 @@ pub(crate) struct UserSketchInner {
   primary_bind_group: BindGroupWithLayout,
   time_buffer: Buffer<f32>,
   dimensions_buffer: Buffer<[f32; 2]>,
-  render_pipeline: RenderPipeline,
+  render_pipeline: Option<RenderPipeline>,
 }
 
-pub(crate) enum UserSketch {
-  Uninitialized(String, RunConfig),
-  Initialized(UserSketchInner),
+pub(crate) struct UserSketch {
+  inner: Option<UserSketchInner>,
+  queued_config: Arc<Mutex<Option<RunConfig>>>,
 }
 impl UserSketch {
-  pub(crate) fn new(wgsl_source: String, config: RunConfig) -> Self {
-    Self::Uninitialized(wgsl_source, config)
+  pub(crate) fn new(config: Arc<Mutex<Option<RunConfig>>>) -> Self {
+    Self {
+      inner: None,
+      queued_config: config,
+    }
+  }
+  fn update_config(&mut self, config: RunConfig, wgpu: &WGPUController) {
+    let Some(inner) = &mut self.inner else {
+      return;
+    };
+    inner.triangles = config.triangles;
+    inner.render_pipeline = Some(
+      wgpu
+        .build_render_pipeline()
+        .add_bind_group_layout(&inner.primary_bind_group.layout)
+        .build_with_shader_entry_points(
+          &wgpu.shader(ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+              &config.wgsl,
+            )),
+          }),
+          Some(&config.vertex_entry),
+          Some(Some(&config.fragment_entry)),
+        ),
+    );
   }
 }
 
 impl Sketch for UserSketch {
   fn init(&mut self, wgpu: &WGPUController) {
-    let Self::Uninitialized(wgsl, config) = self else {
-      panic!()
-    };
     let time_buffer = wgpu.buffer(0.);
     let dimensions_buffer = wgpu.buffer([0., 0.]);
     let primary_bind_group = wgpu
@@ -42,23 +66,12 @@ impl Sketch for UserSketch {
       .with_uniform_buffer_entry(&dimensions_buffer)
       .with_uniform_buffer_entry(&time_buffer)
       .build();
-    let render_pipeline = wgpu
-      .build_render_pipeline()
-      .add_bind_group_layout(&primary_bind_group.layout)
-      .build_with_shader_entry_points(
-        &wgpu.shader(ShaderModuleDescriptor {
-          label: None,
-          source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(wgsl)),
-        }),
-        Some(&config.vertex_entry),
-        Some(Some(&config.fragment_entry)),
-      );
-    *self = Self::Initialized(UserSketchInner {
+    self.inner = Some(UserSketchInner {
       time_buffer,
       dimensions_buffer,
       primary_bind_group,
-      render_pipeline,
-      triangles: config.triangles,
+      render_pipeline: None,
+      triangles: 0,
     });
   }
 
@@ -68,7 +81,18 @@ impl Sketch for UserSketch {
     surface_view: TextureView,
     data: FrameData,
   ) {
-    if let Self::Initialized(inner) = self {
+    let config = if let Ok(mut queued) = self.queued_config.lock() {
+      queued.take()
+    } else {
+      None
+    };
+
+    if let Some(config) = config {
+      self.update_config(config, wgpu);
+    }
+    if let Some(inner) = &mut self.inner
+      && let Some(render_pipeline) = &inner.render_pipeline
+    {
       wgpu
         .write_buffer(&inner.dimensions_buffer, data.dimensions)
         .write_buffer(&inner.time_buffer, data.t);
@@ -76,7 +100,7 @@ impl Sketch for UserSketch {
         encoder
           .simple_render_pass(&surface_view)
           .with_bind_groups([&inner.primary_bind_group])
-          .with_pipeline(&inner.render_pipeline)
+          .with_pipeline(render_pipeline)
           .draw(0..(inner.triangles * 3), 0..1);
       });
     }

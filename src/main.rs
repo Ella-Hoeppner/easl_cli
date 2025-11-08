@@ -5,10 +5,13 @@ use easl::{
   compile_easl_source_to_wgsl, format_easl_source, get_easl_program_info,
 };
 use hollow::sketch::Sketch;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+  Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
 
 use crate::app::{RunConfig, UserSketch};
@@ -82,6 +85,10 @@ enum Command {
                    e.g. `(def triangles: u32 100)`"
     )]
     triangles: Option<u32>,
+
+    /// Watch for file changes and hot-reload the shader
+    #[arg(short, long)]
+    watch: bool,
   },
 }
 
@@ -250,9 +257,9 @@ fn compile_file(
       RecursiveMode::NonRecursive
     };
 
-    watcher
-      .watch(&input, watch_mode)
-      .map_err(|e| format!("Error: Failed to watch path {}\n{}", input.display(), e))?;
+    watcher.watch(&input, watch_mode).map_err(|e| {
+      format!("Error: Failed to watch path {}\n{}", input.display(), e)
+    })?;
 
     // Process file change events
     loop {
@@ -312,7 +319,10 @@ fn compile_file(
   }
 }
 
-fn compile_once(input: &PathBuf, output: &Option<PathBuf>) -> Result<(), String> {
+fn compile_once(
+  input: &PathBuf,
+  output: &Option<PathBuf>,
+) -> Result<(), String> {
   if input.is_dir() {
     // Compile all .easl files in the directory recursively
     let easl_files = find_easl_files(input)?;
@@ -414,7 +424,10 @@ fn check_file(input: PathBuf) -> Result<(), String> {
   }
 }
 
-fn format_single_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+fn format_single_file(
+  input: PathBuf,
+  output: Option<PathBuf>,
+) -> Result<(), String> {
   let easl_source = read_source(&input)?;
   println!("Formatting {}...", input.display());
   let formatted = format_easl_source(&easl_source);
@@ -496,91 +509,187 @@ fn format_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   }
 }
 
+fn create_run_config(
+  easl_source: &str,
+  fragment: &Option<String>,
+  vertex: &Option<String>,
+  triangles: &Option<u32>,
+) -> Result<RunConfig, String> {
+  let wgsl = try_compile_easl(easl_source)?;
+  let program_info = get_easl_program_info(easl_source).unwrap().unwrap();
+
+  let fragment_entry = if let Some(fragment) = fragment {
+    if program_info.fragment_entries.contains(fragment) {
+      fragment.clone()
+    } else {
+      return Err(format!("No fragment entry point named '{fragment}'"));
+    }
+  } else {
+    match program_info.fragment_entries.len() {
+      0 => return Err(format!("No fragment entry point found")),
+      1 => program_info.fragment_entries[0].clone(),
+      _ => {
+        return Err(format!(
+          "Multiple fragment entry points found. Use '--fragment' to \
+          specify one."
+        ));
+      }
+    }
+  };
+
+  let vertex_entry = if let Some(vertex) = vertex {
+    if program_info.vertex_entries.contains(vertex) {
+      vertex.clone()
+    } else {
+      return Err(format!("No vertex entry point named '{vertex}'"));
+    }
+  } else {
+    match program_info.vertex_entries.len() {
+      0 => return Err(format!("No vertex entry point found")),
+      1 => program_info.vertex_entries[0].clone(),
+      _ => {
+        return Err(format!(
+          "Multiple vertex entry points found. Use '--vertex' to \
+          specify one."
+        ));
+      }
+    }
+  };
+
+  let triangles = if let Some(triangles) = triangles {
+    *triangles
+  } else {
+    if let Some(triangles) = program_info.global_vars.iter().find_map(|var| {
+      if var.uniform_info.is_none()
+        && var.name == "triangles"
+        && let Some(value) = &var.value
+        && let Ok(triangles) = value.parse::<u32>()
+      {
+        Some(triangles)
+      } else {
+        None
+      }
+    }) {
+      triangles
+    } else {
+      return Err(format!(
+        "No triangle count specified. Specify it with the `--triangles` \
+          flag or by defining it in your source file, e.g. \
+          '(def triangles: u32 5)'"
+      ));
+    }
+  };
+
+  Ok(RunConfig {
+    wgsl,
+    fragment_entry,
+    vertex_entry,
+    triangles,
+  })
+}
+
 fn run_file(
   input: PathBuf,
   fragment: Option<String>,
   vertex: Option<String>,
   triangles: Option<u32>,
+  watch: bool,
 ) -> Result<(), String> {
   let easl_source = read_source(&input)?;
   println!("Running {}...", input.display());
-  match try_compile_easl(&easl_source) {
-    Ok(wgsl) => {
-      let program_info = get_easl_program_info(&easl_source).unwrap().unwrap();
-      let fragment_entry = if let Some(fragment) = fragment {
-        if program_info.fragment_entries.contains(&fragment) {
-          fragment
-        } else {
-          return Err(format!("No fragment entry point named '{fragment}'"));
-        }
-      } else {
-        match program_info.fragment_entries.len() {
-          0 => return Err(format!("No fragment entry point found")),
-          1 => program_info.fragment_entries[0].clone(),
-          _ => {
-            return Err(format!(
-              "Multiple fragment entry points found. Use '--fragment' to \
-              specify one."
-            ));
-          }
+
+  let initial_config = create_run_config(&easl_source, &fragment, &vertex, &triangles)?;
+  let config_arc = Arc::new(Mutex::new(Some(initial_config)));
+
+  if watch {
+    // Clone Arc for the watcher thread
+    let config_arc_clone = Arc::clone(&config_arc);
+    let input_clone = input.clone();
+    let fragment_clone = fragment.clone();
+    let vertex_clone = vertex.clone();
+
+    // Spawn watcher thread
+    std::thread::spawn(move || {
+      // Track file content for deduplication
+      let mut file_content = match fs::read_to_string(&input_clone) {
+        Ok(content) => content,
+        Err(_) => return,
+      };
+
+      // Set up file watcher
+      let (tx, rx) = channel();
+
+      let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+        Ok(w) => w,
+        Err(e) => {
+          eprintln!("Error: Failed to create file watcher\n{}", e);
+          return;
         }
       };
-      let vertex_entry = if let Some(vertex) = vertex {
-        if program_info.vertex_entries.contains(&vertex) {
-          vertex
-        } else {
-          return Err(format!("No vertex entry point named '{vertex}'"));
-        }
-      } else {
-        match program_info.vertex_entries.len() {
-          0 => return Err(format!("No vertex entry point found")),
-          1 => program_info.vertex_entries[0].clone(),
-          _ => {
-            return Err(format!(
-              "Multiple fragment entry points found. Use '--fragment' to \
-              specify one."
-            ));
-          }
-        }
-      };
-      let triangles = if let Some(triangles) = triangles {
-        triangles
-      } else {
-        if let Some(triangles) =
-          program_info.global_vars.iter().find_map(|var| {
-            if var.uniform_info.is_none()
-              && var.name == "triangles"
-              && let Some(value) = &var.value
-              && let Ok(triangles) = value.parse::<u32>()
-            {
-              Some(triangles)
-            } else {
-              None
+
+      if let Err(e) = watcher.watch(&input_clone, RecursiveMode::NonRecursive) {
+        eprintln!("Error: Failed to watch file {}\n{}", input_clone.display(), e);
+        return;
+      }
+
+      println!("Watching {} for changes...", input_clone.display());
+
+      // Process file change events
+      loop {
+        match rx.recv() {
+          Ok(Ok(event)) => {
+            match event.kind {
+              EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
+                for path in &event.paths {
+                  if path == &input_clone || path.ends_with(input_clone.file_name().unwrap_or_default()) {
+                    // Read current file content
+                    let current_content = match fs::read_to_string(&input_clone) {
+                      Ok(content) => content,
+                      Err(e) => {
+                        eprintln!("Error reading {}: {}", input_clone.display(), e);
+                        continue;
+                      }
+                    };
+
+                    // Check if content has actually changed
+                    if file_content == current_content {
+                      continue;
+                    }
+
+                    file_content = current_content.clone();
+
+                    // Try to create new config
+                    println!("\n{} changed, recompiling...", input_clone.display());
+                    match create_run_config(&current_content, &fragment_clone, &vertex_clone, &triangles) {
+                      Ok(new_config) => {
+                        if let Ok(mut config) = config_arc_clone.lock() {
+                          *config = Some(new_config);
+                          println!("Shader reloaded successfully!");
+                        }
+                      }
+                      Err(e) => {
+                        eprintln!("{}", e);
+                      }
+                    }
+                    break; // Exit the path loop after handling
+                  }
+                }
+              }
+              _ => {} // Ignore other event types
             }
-          })
-        {
-          triangles
-        } else {
-          return Err(format!(
-            "No triangle count specified. Specify it with the `--triangles` \
-              flag or by defining it in your source file, e.g. \
-              '(def triangles: u32 5)'"
-          ));
+          }
+          Ok(Err(e)) => eprintln!("Watch error: {}", e),
+          Err(e) => {
+            eprintln!("Channel error: {}", e);
+            break;
+          }
         }
-      };
-      UserSketch::new(
-        wgsl,
-        RunConfig {
-          fragment_entry,
-          vertex_entry,
-          triangles,
-        },
-      )
-      .run();
-      Ok(())
-    }
-    Err(e) => Err(e),
+      }
+    });
   }
+
+  UserSketch::new(config_arc).run();
+  Ok(())
 }
 
 fn main() {
@@ -601,7 +710,8 @@ fn main() {
       fragment,
       vertex,
       triangles,
-    } => run_file(input, fragment, vertex, triangles),
+      watch,
+    } => run_file(input, fragment, vertex, triangles, watch),
   } {
     eprintln!("{e}");
     std::process::exit(1);
