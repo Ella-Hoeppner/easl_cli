@@ -5,8 +5,11 @@ use easl::{
   compile_easl_source_to_wgsl, format_easl_source, get_easl_program_info,
 };
 use hollow::sketch::Sketch;
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
 
 use crate::app::{RunConfig, UserSketch};
 
@@ -28,6 +31,10 @@ enum Command {
     /// Output file or directory, defaults to input file with .wgsl extension
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Watch for file changes and recompile automatically
+    #[arg(short, long)]
+    watch: bool,
   },
   /// Typecheck a .easl file without comiling
   Check {
@@ -162,10 +169,153 @@ fn compile_single_file(
   }
 }
 
-fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+fn get_output_path_for_file(
+  file: &Path,
+  input_base: &Path,
+  output_base: &Option<PathBuf>,
+) -> Result<PathBuf, String> {
+  if let Some(output_dir) = output_base {
+    if input_base.is_dir() {
+      // Calculate relative path from input directory
+      let relative_path = file.strip_prefix(input_base).map_err(|e| {
+        format!(
+          "Error: Failed to calculate relative path for {}\n{}",
+          file.display(),
+          e
+        )
+      })?;
+
+      // Construct output path with same relative structure
+      let mut out_path = output_dir.join(relative_path);
+      out_path.set_extension("wgsl");
+
+      // Create parent directories if they don't exist
+      if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+          format!(
+            "Error: Failed to create directory {}\n{}",
+            parent.display(),
+            e
+          )
+        })?;
+      }
+
+      Ok(out_path)
+    } else {
+      // Single file with output specified
+      Ok(output_dir.clone())
+    }
+  } else {
+    // No output specified, use default
+    let mut output_path = file.to_path_buf();
+    output_path.set_extension("wgsl");
+    Ok(output_path)
+  }
+}
+
+fn compile_file(
+  input: PathBuf,
+  output: Option<PathBuf>,
+  watch: bool,
+) -> Result<(), String> {
+  if watch {
+    // Initial compilation
+    compile_once(&input, &output)?;
+
+    // Build initial content cache
+    let mut file_contents: HashMap<PathBuf, String> = HashMap::new();
+    let files_to_watch = if input.is_dir() {
+      find_easl_files(&input)?
+    } else {
+      vec![input.clone()]
+    };
+
+    for file in &files_to_watch {
+      if let Ok(content) = fs::read_to_string(file) {
+        file_contents.insert(file.clone(), content);
+      }
+    }
+
+    // Set up file watcher
+    println!("\nWatching for changes... (Press Ctrl+C to stop)");
+
+    let (tx, rx) = channel();
+    let mut watcher = RecommendedWatcher::new(tx, Config::default())
+      .map_err(|e| format!("Error: Failed to create file watcher\n{}", e))?;
+
+    // Watch the input path
+    let watch_mode = if input.is_dir() {
+      RecursiveMode::Recursive
+    } else {
+      RecursiveMode::NonRecursive
+    };
+
+    watcher
+      .watch(&input, watch_mode)
+      .map_err(|e| format!("Error: Failed to watch path {}\n{}", input.display(), e))?;
+
+    // Process file change events
+    loop {
+      match rx.recv() {
+        Ok(Ok(Event {
+          kind: EventKind::Modify(_),
+          paths,
+          ..
+        })) => {
+          for path in paths {
+            if path.extension().and_then(|s| s.to_str()) == Some("easl") {
+              // Read current file content
+              let current_content = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(e) => {
+                  eprintln!("Error reading {}: {}", path.display(), e);
+                  continue;
+                }
+              };
+
+              // Check if content has actually changed
+              if let Some(cached_content) = file_contents.get(&path) {
+                if cached_content == &current_content {
+                  // Content unchanged, skip recompilation
+                  continue;
+                }
+              }
+
+              println!("\n{} changed, recompiling...", path.display());
+              let output_path =
+                match get_output_path_for_file(&path, &input, &output) {
+                  Ok(p) => Some(p),
+                  Err(e) => {
+                    eprintln!("{}", e);
+                    continue;
+                  }
+                };
+
+              if let Err(e) = compile_single_file(path.clone(), output_path) {
+                eprintln!("{}", e);
+              }
+
+              // Update cached content after compilation attempt (success or failure)
+              file_contents.insert(path.clone(), current_content);
+            }
+          }
+        }
+        Ok(Ok(_)) => {} // Ignore other event types
+        Ok(Err(e)) => eprintln!("Watch error: {}", e),
+        Err(e) => {
+          return Err(format!("Error: Channel receive error\n{}", e));
+        }
+      }
+    }
+  } else {
+    compile_once(&input, &output)
+  }
+}
+
+fn compile_once(input: &PathBuf, output: &Option<PathBuf>) -> Result<(), String> {
   if input.is_dir() {
     // Compile all .easl files in the directory recursively
-    let easl_files = find_easl_files(&input)?;
+    let easl_files = find_easl_files(input)?;
 
     if easl_files.is_empty() {
       return Err(format!(
@@ -182,34 +332,13 @@ fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
 
     let mut failed = Vec::new();
     for file in &easl_files {
-      let output_path = if let Some(ref output_dir) = output {
-        // Calculate relative path from input directory
-        let relative_path = file.strip_prefix(&input).map_err(|e| {
-          format!(
-            "Error: Failed to calculate relative path for {}\n{}",
-            file.display(),
-            e
-          )
-        })?;
-
-        // Construct output path with same relative structure
-        let mut out_path = output_dir.join(relative_path);
-        out_path.set_extension("wgsl");
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = out_path.parent() {
-          fs::create_dir_all(parent).map_err(|e| {
-            format!(
-              "Error: Failed to create directory {}\n{}",
-              parent.display(),
-              e
-            )
-          })?;
+      let output_path = match get_output_path_for_file(file, input, output) {
+        Ok(p) => Some(p),
+        Err(e) => {
+          eprintln!("{}", e);
+          failed.push(file);
+          continue;
         }
-
-        Some(out_path)
-      } else {
-        None
       };
 
       if let Err(e) = compile_single_file(file.clone(), output_path) {
@@ -225,7 +354,12 @@ fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
     }
   } else {
     // Compile single file
-    compile_single_file(input, output)
+    let output_path = if output.is_some() {
+      output.clone()
+    } else {
+      None
+    };
+    compile_single_file(input.clone(), output_path)
   }
 }
 
@@ -455,7 +589,11 @@ fn main() {
   }
   let cli = Cli::parse();
   if let Err(e) = match cli.command {
-    Command::Compile { input, output } => compile_file(input, output),
+    Command::Compile {
+      input,
+      output,
+      watch,
+    } => compile_file(input, output, watch),
     Command::Check { input } => check_file(input),
     Command::Format { input, output } => format_file(input, output),
     Command::Run {
