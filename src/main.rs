@@ -31,15 +31,15 @@ enum Command {
   },
   /// Typecheck a .easl file without comiling
   Check {
-    /// Path of the .easl file to check
+    /// Path of the .easl file or directory to check
     input: PathBuf,
   },
   /// Format a .easl file
   Format {
-    /// Path of the .easl file to format
+    /// Path of the .easl file or directory to format
     input: PathBuf,
 
-    /// Output file path, defaults to same as input
+    /// Output file or directory, defaults to same as input
     #[arg(short, long)]
     output: Option<PathBuf>,
   },
@@ -229,17 +229,58 @@ fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   }
 }
 
-fn check_file(input: PathBuf) -> Result<(), String> {
+fn check_single_file(input: PathBuf) -> Result<(), String> {
   let easl_source = read_source(&input)?;
   print!("Typechecking {}...   ", input.display());
   match try_compile_easl(&easl_source) {
-    Ok(_) => println!("✅"),
-    Err(error_description) => println!("❌\n{error_description}\n"),
+    Ok(_) => {
+      println!("✅");
+      Ok(())
+    }
+    Err(error_description) => {
+      println!("❌\n{error_description}\n");
+      Err(error_description)
+    }
   }
-  Ok(())
 }
 
-fn format_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+fn check_file(input: PathBuf) -> Result<(), String> {
+  if input.is_dir() {
+    // Check all .easl files in the directory recursively
+    let easl_files = find_easl_files(&input)?;
+
+    if easl_files.is_empty() {
+      return Err(format!(
+        "No .easl files found in directory {}",
+        input.display()
+      ));
+    }
+
+    println!(
+      "Found {} .easl file(s) in {}",
+      easl_files.len(),
+      input.display()
+    );
+
+    let mut failed = Vec::new();
+    for file in &easl_files {
+      if let Err(_) = check_single_file(file.clone()) {
+        failed.push(file);
+      }
+    }
+
+    if !failed.is_empty() {
+      Err(format!("\nFailed to typecheck {} file(s)", failed.len()))
+    } else {
+      Ok(())
+    }
+  } else {
+    // Check single file
+    check_single_file(input)
+  }
+}
+
+fn format_single_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   let easl_source = read_source(&input)?;
   println!("Formatting {}...", input.display());
   let formatted = format_easl_source(&easl_source);
@@ -253,6 +294,72 @@ fn format_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   })?;
   println!("Formatted: {}", output_path.display());
   Ok(())
+}
+
+fn format_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+  if input.is_dir() {
+    // Format all .easl files in the directory recursively
+    let easl_files = find_easl_files(&input)?;
+
+    if easl_files.is_empty() {
+      return Err(format!(
+        "No .easl files found in directory {}",
+        input.display()
+      ));
+    }
+
+    println!(
+      "Found {} .easl file(s) in {}",
+      easl_files.len(),
+      input.display()
+    );
+
+    let mut failed = Vec::new();
+    for file in &easl_files {
+      let output_path = if let Some(ref output_dir) = output {
+        // Calculate relative path from input directory
+        let relative_path = file.strip_prefix(&input).map_err(|e| {
+          format!(
+            "Error: Failed to calculate relative path for {}\n{}",
+            file.display(),
+            e
+          )
+        })?;
+
+        // Construct output path with same relative structure
+        let out_path = output_dir.join(relative_path);
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = out_path.parent() {
+          fs::create_dir_all(parent).map_err(|e| {
+            format!(
+              "Error: Failed to create directory {}\n{}",
+              parent.display(),
+              e
+            )
+          })?;
+        }
+
+        Some(out_path)
+      } else {
+        None
+      };
+
+      if let Err(e) = format_single_file(file.clone(), output_path) {
+        eprintln!("{}", e);
+        failed.push(file);
+      }
+    }
+
+    if !failed.is_empty() {
+      Err(format!("\nFailed to format {} file(s)", failed.len()))
+    } else {
+      Ok(())
+    }
+  } else {
+    // Format single file
+    format_single_file(input, output)
+  }
 }
 
 fn run_file(
