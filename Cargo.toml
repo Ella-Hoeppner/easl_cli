@@ -8,10 +8,11 @@ name = "easl"
 path = "src/main.rs"
 
 [dependencies]
-easl = { git = "https://github.com/Ella-Hoeppner/easl" }
+easl = { path = "../easl" } # { git = "https://github.com/Ella-Hoeppner/easl" }
 hollow = { git = "https://github.com/Ella-Hoeppner/hollow-rs" }
 wgpu = "27.0"
 clap = { version = "4.0", features = ["derive"] }
+notify = "8.2.0"
 
 [profile.release]
 # debug = true

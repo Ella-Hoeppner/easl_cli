@@ -22,10 +22,10 @@ struct Cli {
 enum Command {
   /// Compile a .easl file to .wgsl
   Compile {
-    /// Path of the .easl file to compile
+    /// Path of the .easl file or directory to compile
     input: PathBuf,
 
-    /// Output file path, defaults to input file with .wgsl extension
+    /// Output file or directory, defaults to input file with .wgsl extension
     #[arg(short, long)]
     output: Option<PathBuf>,
   },
@@ -109,7 +109,33 @@ fn try_compile_easl(easl_source: &str) -> Result<String, String> {
   }
 }
 
-fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+fn find_easl_files(dir: &PathBuf) -> Result<Vec<PathBuf>, String> {
+  let mut easl_files = Vec::new();
+
+  let entries = fs::read_dir(dir).map_err(|e| {
+    format!("Error: Failed to read directory {}\n{}", dir.display(), e)
+  })?;
+
+  for entry in entries {
+    let entry = entry
+      .map_err(|e| format!("Error: Failed to read directory entry\n{}", e))?;
+    let path = entry.path();
+
+    if path.is_dir() {
+      // Recursively search subdirectories
+      easl_files.extend(find_easl_files(&path)?);
+    } else if path.extension().and_then(|s| s.to_str()) == Some("easl") {
+      easl_files.push(path);
+    }
+  }
+
+  Ok(easl_files)
+}
+
+fn compile_single_file(
+  input: PathBuf,
+  output: Option<PathBuf>,
+) -> Result<(), String> {
   let easl_source = read_source(&input)?;
 
   println!("Compiling {}...", input.display());
@@ -136,16 +162,79 @@ fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   }
 }
 
+fn compile_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
+  if input.is_dir() {
+    // Compile all .easl files in the directory recursively
+    let easl_files = find_easl_files(&input)?;
+
+    if easl_files.is_empty() {
+      return Err(format!(
+        "No .easl files found in directory {}",
+        input.display()
+      ));
+    }
+
+    println!(
+      "Found {} .easl file(s) in {}",
+      easl_files.len(),
+      input.display()
+    );
+
+    let mut failed = Vec::new();
+    for file in &easl_files {
+      let output_path = if let Some(ref output_dir) = output {
+        // Calculate relative path from input directory
+        let relative_path = file.strip_prefix(&input).map_err(|e| {
+          format!(
+            "Error: Failed to calculate relative path for {}\n{}",
+            file.display(),
+            e
+          )
+        })?;
+
+        // Construct output path with same relative structure
+        let mut out_path = output_dir.join(relative_path);
+        out_path.set_extension("wgsl");
+
+        // Create parent directories if they don't exist
+        if let Some(parent) = out_path.parent() {
+          fs::create_dir_all(parent).map_err(|e| {
+            format!(
+              "Error: Failed to create directory {}\n{}",
+              parent.display(),
+              e
+            )
+          })?;
+        }
+
+        Some(out_path)
+      } else {
+        None
+      };
+
+      if let Err(e) = compile_single_file(file.clone(), output_path) {
+        eprintln!("{}", e);
+        failed.push(file);
+      }
+    }
+
+    if !failed.is_empty() {
+      Err(format!("\nFailed to compile {} file(s)", failed.len()))
+    } else {
+      Ok(())
+    }
+  } else {
+    // Compile single file
+    compile_single_file(input, output)
+  }
+}
+
 fn check_file(input: PathBuf) -> Result<(), String> {
   let easl_source = read_source(&input)?;
-  println!("Typechecking {}...", input.display());
-  match compile_easl_source_to_wgsl(&easl_source) {
-    Ok(_) => {
-      println!("Program typechecked successfully!");
-    }
-    Err(error_log) => {
-      println!("{error_log:#?}");
-    }
+  print!("Typechecking {}...   ", input.display());
+  match try_compile_easl(&easl_source) {
+    Ok(_) => println!("✅"),
+    Err(error_description) => println!("❌\n{error_description}\n"),
   }
   Ok(())
 }
@@ -254,6 +343,9 @@ fn run_file(
 }
 
 fn main() {
+  unsafe {
+    std::env::set_var("RUST_BACKTRACE", "1");
+  }
   let cli = Cli::parse();
   if let Err(e) = match cli.command {
     Command::Compile { input, output } => compile_file(input, output),
