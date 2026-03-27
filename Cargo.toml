@@ -8,6 +8,7 @@ name = "easl"
 path = "src/main.rs"
 
 [features]
+default = ["interpreter"]
 interpreter = ["easl/window"]
 
 [dependencies]
