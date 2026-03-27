@@ -1,20 +1,20 @@
-mod app;
-
 use clap::{Parser, Subcommand};
-use easl::{
-  compile_easl_source_to_wgsl, format_easl_source, get_easl_program_info,
-};
-use hollow::sketch::Sketch;
+#[cfg(feature = "interpreter")]
+use easl::compiler::builtins::built_in_macros;
+#[cfg(feature = "interpreter")]
+use easl::compiler::program::Program;
+#[cfg(feature = "interpreter")]
+use easl::interpreter::run_program_entry;
+#[cfg(feature = "interpreter")]
+use easl::parse::parse_easl_without_comments;
+use easl::{compile_easl_source_to_wgsl, format_easl_source};
 use notify::{
   Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::channel;
-
-use crate::app::{RunConfig, UserSketch};
 
 #[derive(Parser)]
 #[command(name = "easl")]
@@ -61,30 +61,10 @@ enum Command {
     #[arg(
       short,
       long,
-      long_help = "Name of the fragment entry point.\n\
-                   Must be a function marked as @fragment.\n\
-                   May be omitted if file has only one fragment entry."
+      long_help = "Name of the `@cpu` entry point.\n\
+                   May be omitted if file has only one cpu entry."
     )]
-    fragment: Option<String>,
-
-    #[arg(
-      short,
-      long,
-      long_help = "Name of the vertex entry point.\n\
-                   Must be a function marked as @vertex.\n\
-                   May be omitted if file has only one vertex entry."
-    )]
-    vertex: Option<String>,
-
-    #[arg(
-      short,
-      long,
-      long_help = "The number of triangles to render.\n\
-                   Must be a positive integer.\n\
-                   May be omitted if specified in the file\n\
-                   e.g. `(def triangles: u32 100)`"
-    )]
-    triangles: Option<u32>,
+    entry: Option<String>,
 
     /// Watch for file changes and hot-reload the shader
     #[arg(short, long)]
@@ -100,6 +80,23 @@ fn read_source(input: &PathBuf) -> Result<String, String> {
       e
     )
   })
+}
+
+#[cfg(feature = "interpreter")]
+fn try_get_validated_easl_program(
+  easl_source: &str,
+) -> Result<Program, String> {
+  let document = parse_easl_without_comments(easl_source);
+  let (mut program, errors) =
+    Program::from_easl_document(&document, built_in_macros());
+  if !errors.is_empty() {
+    return Err(errors.describe(&document));
+  }
+  let errors = program.validate_raw_program();
+  if !errors.is_empty() {
+    return Err(errors.describe(&document));
+  }
+  Ok(program)
 }
 
 fn try_compile_easl(easl_source: &str) -> Result<String, String> {
@@ -509,186 +506,22 @@ fn format_file(input: PathBuf, output: Option<PathBuf>) -> Result<(), String> {
   }
 }
 
-fn create_run_config(
-  easl_source: &str,
-  fragment: &Option<String>,
-  vertex: &Option<String>,
-  triangles: &Option<u32>,
-) -> Result<RunConfig, String> {
-  let wgsl = try_compile_easl(easl_source)?;
-  let program_info = get_easl_program_info(easl_source).unwrap().unwrap();
-
-  let fragment_entry = if let Some(fragment) = fragment {
-    if program_info.fragment_entries.contains(fragment) {
-      fragment.clone()
-    } else {
-      return Err(format!("No fragment entry point named '{fragment}'"));
-    }
-  } else {
-    match program_info.fragment_entries.len() {
-      0 => return Err(format!("No fragment entry point found")),
-      1 => program_info.fragment_entries[0].clone(),
-      _ => {
-        return Err(format!(
-          "Multiple fragment entry points found. Use '--fragment' to \
-          specify one."
-        ));
-      }
-    }
-  };
-
-  let vertex_entry = if let Some(vertex) = vertex {
-    if program_info.vertex_entries.contains(vertex) {
-      vertex.clone()
-    } else {
-      return Err(format!("No vertex entry point named '{vertex}'"));
-    }
-  } else {
-    match program_info.vertex_entries.len() {
-      0 => return Err(format!("No vertex entry point found")),
-      1 => program_info.vertex_entries[0].clone(),
-      _ => {
-        return Err(format!(
-          "Multiple vertex entry points found. Use '--vertex' to \
-          specify one."
-        ));
-      }
-    }
-  };
-
-  let triangles = if let Some(triangles) = triangles {
-    *triangles
-  } else {
-    if let Some(triangles) = program_info.global_vars.iter().find_map(|var| {
-      if var.uniform_info.is_none()
-        && var.name == "triangles"
-        && let Some(value) = &var.value
-        && let Ok(triangles) = value.parse::<u32>()
-      {
-        Some(triangles)
-      } else {
-        None
-      }
-    }) {
-      triangles
-    } else {
-      return Err(format!(
-        "No triangle count specified. Specify it with the `--triangles` \
-          flag or by defining it in your source file, e.g. \
-          '(def triangles: u32 5)'"
-      ));
-    }
-  };
-
-  Ok(RunConfig {
-    wgsl,
-    fragment_entry,
-    vertex_entry,
-    triangles,
-  })
-}
-
+#[cfg(feature = "interpreter")]
 fn run_file(
   input: PathBuf,
-  fragment: Option<String>,
-  vertex: Option<String>,
-  triangles: Option<u32>,
+  entry: Option<String>,
   watch: bool,
 ) -> Result<(), String> {
   let easl_source = read_source(&input)?;
-  println!("Running {}...", input.display());
-
-  let initial_config = create_run_config(&easl_source, &fragment, &vertex, &triangles)?;
-  let config_arc = Arc::new(Mutex::new(Some(initial_config)));
-
+  let program = try_get_validated_easl_program(&easl_source)?;
   if watch {
-    // Clone Arc for the watcher thread
-    let config_arc_clone = Arc::clone(&config_arc);
-    let input_clone = input.clone();
-    let fragment_clone = fragment.clone();
-    let vertex_clone = vertex.clone();
-
-    // Spawn watcher thread
-    std::thread::spawn(move || {
-      // Track file content for deduplication
-      let mut file_content = match fs::read_to_string(&input_clone) {
-        Ok(content) => content,
-        Err(_) => return,
-      };
-
-      // Set up file watcher
-      let (tx, rx) = channel();
-
-      let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
-        Ok(w) => w,
-        Err(e) => {
-          eprintln!("Error: Failed to create file watcher\n{}", e);
-          return;
-        }
-      };
-
-      if let Err(e) = watcher.watch(&input_clone, RecursiveMode::NonRecursive) {
-        eprintln!("Error: Failed to watch file {}\n{}", input_clone.display(), e);
-        return;
-      }
-
-      println!("Watching {} for changes...", input_clone.display());
-
-      // Process file change events
-      loop {
-        match rx.recv() {
-          Ok(Ok(event)) => {
-            match event.kind {
-              EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
-                for path in &event.paths {
-                  if path == &input_clone || path.ends_with(input_clone.file_name().unwrap_or_default()) {
-                    // Read current file content
-                    let current_content = match fs::read_to_string(&input_clone) {
-                      Ok(content) => content,
-                      Err(e) => {
-                        eprintln!("Error reading {}: {}", input_clone.display(), e);
-                        continue;
-                      }
-                    };
-
-                    // Check if content has actually changed
-                    if file_content == current_content {
-                      continue;
-                    }
-
-                    file_content = current_content.clone();
-
-                    // Try to create new config
-                    println!("\n{} changed, recompiling...", input_clone.display());
-                    match create_run_config(&current_content, &fragment_clone, &vertex_clone, &triangles) {
-                      Ok(new_config) => {
-                        if let Ok(mut config) = config_arc_clone.lock() {
-                          *config = Some(new_config);
-                          println!("Shader reloaded successfully!");
-                        }
-                      }
-                      Err(e) => {
-                        eprintln!("{}", e);
-                      }
-                    }
-                    break; // Exit the path loop after handling
-                  }
-                }
-              }
-              _ => {} // Ignore other event types
-            }
-          }
-          Ok(Err(e)) => eprintln!("Watch error: {}", e),
-          Err(e) => {
-            eprintln!("Channel error: {}", e);
-            break;
-          }
-        }
-      }
-    });
+    todo!()
+  } else {
+    match run_program_entry(program, entry.as_ref().map(|s| s.as_str())) {
+      Err(e) => return Err(format!("{e:?}")),
+      _ => {}
+    }
   }
-
-  UserSketch::new(config_arc).run();
   Ok(())
 }
 
@@ -707,11 +540,23 @@ fn main() {
     Command::Format { input, output } => format_file(input, output),
     Command::Run {
       input,
-      fragment,
-      vertex,
-      triangles,
+      entry,
       watch,
-    } => run_file(input, fragment, vertex, triangles, watch),
+    } => {
+      #[cfg(feature = "interpreter")]
+      {
+        run_file(input, entry, watch)
+      }
+      #[cfg(not(feature = "interpreter"))]
+      {
+        Err(
+        "This build of the easl CLI was compiled without interpreter support. \
+         Build the CLI with `--features interpreter` to enable the `run` \
+         command."
+          .to_string(),
+      )
+      }
+    }
   } {
     eprintln!("{e}");
     std::process::exit(1);
