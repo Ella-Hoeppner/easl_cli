@@ -4,7 +4,9 @@ CLI for [easl](https://github.com/Ella-Hoeppner/easl), the Enhanced Abstraction 
 
 ## Installation
 
-After cloning this repo, run `install.sh`. This will create an executable at `./bin/easl`. You can test that the executable was created successfully with `./bin/easl run ./examples/raymarch.easl`. You should see a window open displaying a rotating, distorted cube shape.
+```cargo install --path .```
+
+After running this, you can test that the installation was successful by running `easl run ./examples/raymarch.easl` from the root of this project. You should see a window open displaying a rotating, distorted cube shape.
 
 ## Usage
 
@@ -23,10 +25,7 @@ After cloning this repo, run `install.sh`. This will create an executable at `./
 - `--output, -o <OUTPUT>` - Specify output file or directory (defaults to formatting in-place)
 
 **run** - Run a .easl shader as a standalone application
-- `easl run <INPUT>` - Run a single .easl file in a window
-- `--fragment, -f <NAME>` - Specify fragment entry point (auto-detected if only one exists)
-- `--vertex, -v <NAME>` - Specify vertex entry point (auto-detected if only one exists)
-- `--triangles, -t <COUNT>` - Specify number of triangles to render (can be defined in shader e.g `(def triangles: u32 5)`)
+- `easl run <INPUT>` - Run a single .easl file in a window (the file must have a `@cpu` entry point for this to work)
 - `--watch, -w` - Watch for file changes and hot-reload the shader
 
 ### Examples

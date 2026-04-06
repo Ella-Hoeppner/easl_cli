@@ -4,9 +4,14 @@ use easl::compiler::builtins::built_in_macros;
 #[cfg(feature = "interpreter")]
 use easl::compiler::program::Program;
 #[cfg(feature = "interpreter")]
-use easl::interpreter::run_program_entry;
+use easl::interpreter::{
+  close_persistent_window, run_program_entry, run_program_entry_with_io,
+  IOManager, StdoutIO,
+};
 #[cfg(feature = "interpreter")]
 use easl::parse::parse_easl_without_comments;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use easl::{compile_easl_source_to_wgsl, format_easl_source};
 use notify::{
   Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
@@ -512,17 +517,118 @@ fn run_file(
   entry: Option<String>,
   watch: bool,
 ) -> Result<(), String> {
-  let easl_source = read_source(&input)?;
-  let program = try_get_validated_easl_program(&easl_source)?;
   if watch {
-    todo!()
+    // AtomicBool polled by the IOManager's reload_requested() on every frame.
+    let reload_flag = Arc::new(AtomicBool::new(false));
+
+    // Channel used to wake the main loop when the program is not running and
+    // we need to block-wait for the next file change.
+    let (change_tx, change_rx) = channel::<()>();
+
+    // File watcher runs in a background thread.  On any real content change
+    // it sets the reload flag (signals the running window loop to exit) and
+    // sends on change_tx (wakes a blocking wait in the main loop).
+    let (notify_tx, notify_rx) = channel();
+    let mut watcher = RecommendedWatcher::new(notify_tx, Config::default())
+      .map_err(|e| format!("Error: Failed to create file watcher\n{}", e))?;
+    watcher.watch(&input, RecursiveMode::NonRecursive).map_err(|e| {
+      format!("Error: Failed to watch path {}\n{}", input.display(), e)
+    })?;
+
+    {
+      let reload_flag = Arc::clone(&reload_flag);
+      let input = input.clone();
+      std::thread::spawn(move || {
+        let mut last = fs::read_to_string(&input).unwrap_or_default();
+        loop {
+          match notify_rx.recv() {
+            Ok(Ok(Event { kind: EventKind::Modify(_), .. })) => {
+              if let Ok(content) = fs::read_to_string(&input) {
+                if content != last {
+                  last = content;
+                  reload_flag.store(true, Ordering::Relaxed);
+                  change_tx.send(()).ok();
+                }
+              }
+            }
+            Ok(Ok(_)) | Ok(Err(_)) => {}
+            Err(_) => break,
+          }
+        }
+      });
+    }
+
+    let mut io = StdoutIO::with_reload_flag(Arc::clone(&reload_flag));
+    let mut last_content = read_source(&input)?;
+
+    println!("Watching for changes... (Press Ctrl+C to stop)");
+
+    loop {
+      // Compile current source.
+      let program = match try_get_validated_easl_program(&last_content) {
+        Ok(p) => p,
+        Err(e) => {
+          eprintln!("Compilation error:\n{e}");
+          close_persistent_window();
+          change_rx
+            .recv()
+            .map_err(|e| format!("Watcher disconnected: {e}"))?;
+          while change_rx.try_recv().is_ok() {}
+          last_content = read_source(&input)?;
+          continue;
+        }
+      };
+
+      // Reset IO state (clears GPU handle and reload flag) before each run.
+      io.reset_for_reload();
+
+      // Run the program.  The same `io` is reused across reloads so the
+      // reload_flag Arc is still wired up.
+      match run_program_entry_with_io(program, entry.as_deref(), io) {
+        Err(e) => {
+          eprintln!("Runtime error: {e:?}");
+          close_persistent_window();
+          // Rebuild io since it was consumed.
+          io = StdoutIO::with_reload_flag(Arc::clone(&reload_flag));
+          change_rx
+            .recv()
+            .map_err(|e| format!("Watcher disconnected: {e}"))?;
+          while change_rx.try_recv().is_ok() {}
+          last_content = read_source(&input)?;
+        }
+        Ok((returned_io, did_reload)) => {
+          io = returned_io;
+          if did_reload {
+            // File already changed — drain any buffered notifications and
+            // re-read; no need to block.
+            while change_rx.try_recv().is_ok() {}
+            last_content = read_source(&input)?;
+            println!("\n{} changed, reloading...", input.display());
+          } else {
+            // Program finished on its own.  Close any leftover window and
+            // wait for the next file change before rerunning.
+            close_persistent_window();
+            println!(
+              "Program finished. Watching for changes... (Ctrl+C to stop)"
+            );
+            change_rx
+              .recv()
+              .map_err(|e| format!("Watcher disconnected: {e}"))?;
+            while change_rx.try_recv().is_ok() {}
+            last_content = read_source(&input)?;
+          }
+        }
+      }
+    }
   } else {
+    let easl_source = read_source(&input)?;
+    let program = try_get_validated_easl_program(&easl_source)?;
     match run_program_entry(program, entry.as_ref().map(|s| s.as_str())) {
       Err(e) => return Err(format!("{e:?}")),
       _ => {}
     }
+    Ok(())
   }
-  Ok(())
 }
 
 fn main() {
