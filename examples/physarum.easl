@@ -1,0 +1,276 @@
+(def TAU: f32
+     6.28318530718)
+
+(def particle-count: u32
+     60000)
+
+(def grid-size: u32
+     1000)
+
+(def trail-opacity: f32
+     0.005)
+
+(def diffusion-factor: f32
+     0.01)
+
+(def decay-factor: f32
+     0.99)
+
+(def sensor-distance: f32
+     0.05)
+
+(def sensor-spread: f32
+     0.1)
+
+(def particle-speed: f32
+     0.002)
+
+(def turn-speed: f32
+     10.)
+
+@{group 0
+  binding 0
+  address storage-write}
+(var particles: [vec4f])
+
+@{group 0
+  binding 1
+  address storage-write}
+(var grid: [vec4f])
+
+@{group 0
+  binding 2
+  address uniform}
+(var screenspace-scale: vec2f)
+
+@{group 0
+  binding 3
+  address uniform}
+(var screenspace-offset: vec2f)
+
+@{group 0
+  binding 4
+  address uniform}
+(var dimensions: vec2f)
+
+@{group 0
+  binding 5
+  address uniform}
+(var rand-offset: f32)
+
+@{group 0
+  binding 6
+  address uniform}
+(var frame-index: u32)
+
+(var rand-state: f32
+     0.)
+
+(defn set-rand-seed [x: f32]
+  (= rand-state (+ rand-offset x)))
+
+(defn sigmoid [a: f32]: f32
+  (-> a - (pow 2.718 <>) (+ 1.) /))
+
+(defn rand []: f32
+  (= rand-state
+     (+ rand-state 0.025))
+  (fract (* 43758.5453123
+            (sin (* rand-state 78.233)))))
+
+(defn cis [x: f32]: vec2f
+  (vec2f (cos x) (sin x)))
+
+(defn uni->bi [x: f32]: f32
+  (-> x (* 2.) (- 1.)))
+
+(defn uni->bi [x: vec2f]: vec2f
+  (vec2f (uni->bi x.x) (uni->bi x.y)))
+
+(defn bi->uni [x: f32]: f32
+  (-> x (+ 1.) (* 0.5)))
+
+(defn bi->uni [x: vec2f]: vec2f
+  (vec2f (bi->uni x.x) (bi->uni x.y)))
+
+@compute
+@{workgroup-size 1}
+(defn randomize-particles []
+  (let [id (.x (global-invocation-id))]
+    (set-rand-seed (* 0.01912 (f32 id)))
+    (= (particles id)
+       (vec4f (uni->bi (vec2f (rand) (rand)))
+              (* TAU (rand))
+              0.))))
+
+(defn lookup-grid [coords: vec2u]: f32
+  (.x (grid (+ coords.x
+               (* grid-size coords.y)))))
+
+(defn lookup-grid [coords: vec2f]: f32
+  (lookup-grid (-> coords
+                   bi->uni
+                   (* (f32 grid-size))
+                   vec2u)))
+
+@compute
+@{workgroup-size 1}
+(defn update-particles []
+  (let [id (.x (global-invocation-id))]
+    (set-rand-seed (* 0.01912 (f32 id)))
+    (let [original-particle (particles id)
+          get-sensor-value (fn [angle-offset: f32]
+                               (lookup-grid (+ original-particle.xy
+                                               (* sensor-distance
+                                                  (cis (+ original-particle.z
+                                                          (* angle-offset TAU)))))))
+          center-sensor (get-sensor-value 0.)
+          left-sensor (get-sensor-value (- sensor-spread))
+          right-sensor (get-sensor-value sensor-spread)
+          new-pos (+ original-particle.xy
+                     (* (cis original-particle.z)
+                        particle-speed))
+          new-particle (if (and (all (> new-pos (vec2f -1.)))
+                                (all (< new-pos (vec2f 1.))))
+                         (-> original-particle
+                             (vec4f (+ (.xy <>)
+                                       (* (cis (.z <>)) particle-speed))
+                                    (+ (.z <>)
+                                       (* turn-speed
+                                          (- right-sensor left-sensor)))
+                                    0.))
+                         (vec4f (uni->bi (vec2f (rand) (rand)))
+                                (* TAU (rand))
+                                0.))]
+      (= (particles id) new-particle)
+      (let [grid-coords (-> new-particle
+                            .xy
+                            bi->uni
+                            (* (f32 grid-size)))]
+        (when (and (all (< grid-coords (vec2f grid-size)))
+                   (all (> grid-coords (vec2f 0.))))
+          (+= (grid (+ (u32 grid-coords.x)
+                       (* grid-size (u32 grid-coords.y))))
+              trail-opacity))))))
+
+@compute
+@{workgroup-size 1}
+(defn update-grid []
+  (let [coords (.xy (global-invocation-id))]
+    (= (grid (+ coords.x
+                (* coords.y grid-size)))
+       (-> (let [current-value (lookup-grid coords)
+                 @var sum 0.
+                 @var count 0u]
+             (for [x -1i (< x 2i) (+= x 1)]
+               (for [y -1i (< y 2i) (+= y 1)]
+                 (let [off-coords (+ (vec2i coords) (vec2i x y))]
+                   (when (and (all (>= off-coords (vec2i 0i)))
+                              (all (< off-coords (vec2i grid-size))))
+                     (+= count 1u)
+                     (+= sum
+                         (lookup-grid (vec2u off-coords)))))))
+             (mix current-value
+                  (/ sum (f32 count))
+                  diffusion-factor))
+           (* decay-factor)
+           vec3f
+           (vec4f 1.)))))
+
+(struct ParticleVertexOutput
+  @{builtin position} pos: vec4f
+  square-pos: vec2f)
+
+@vertex
+(defn particle-vertex []: ParticleVertexOutput
+  (let [particle-index (/ (vertex-index) 6)
+        corner-index (% (vertex-index) 6)
+        particle (particles particle-index)
+        corner-pos (match corner-index
+                     0 (vec2f -1. -1.)
+                     1 (vec2f -1. 1.)
+                     2 (vec2f 1. -1.)
+                     3 (vec2f 1. 1.)
+                     4 (vec2f 1. -1.)
+                     _ (vec2f -1. 1.))]
+    (ParticleVertexOutput (vec4f (* screenspace-scale
+                                    (+ particle.xy
+                                       (* corner-pos 0.001)))
+                                 0.
+                                 1.)
+                          corner-pos)))
+
+@fragment
+(defn particle-fragment [in: ParticleVertexOutput]: @{location 0} vec4f
+  (when (> (length in.square-pos) 1.)
+    (discard))
+  (vec4f 1. 0. 0. 1.))
+
+@vertex
+(defn fullscreen-vertex []: vec4f
+  (vec4f (match (vertex-index)
+           0 (vec2f -1.)
+           1 (vec2f -1. 3.)
+           _ (vec2f 3. -1.))
+         0.
+         1.))
+
+@fragment
+(defn grid-fragment []: @{location 0} vec4f
+  (let [pos (-> (position)
+                .xy
+                (vec2f (.x <>)
+                       (- dimensions.y (.y <>)))
+                (- (* 0.5
+                      (- dimensions
+                         (min dimensions.x dimensions.y))))
+                (/ (vec2f dimensions))
+                (/ screenspace-scale))]
+    (if (or (any (< pos (vec2f 0.)))
+            (any (> pos (vec2f 1.))))
+      (vec4f 0.)
+      (-> pos
+          (* (f32 grid-size))
+          vec2u
+          (+ (.x <>) (* grid-size (.y <>)))
+          grid
+          .xyz
+          (vec4f 1.)))))
+
+@cpu
+(defn main []
+  (= particles
+     (zeroed-array particle-count))
+  (= grid
+     (zeroed-array (* grid-size grid-size)))
+  (dispatch-compute-shader randomize-particles
+                           (vec3u particle-count 1u 1u))
+  (spawn-window (fn []
+                    (let [min-dim (-> (window-resolution)
+                                      (min (.x <>) (.y <>))
+                                      f32)]
+                      (= screenspace-scale
+                         (-> (window-resolution)
+                             vec2f
+                             (/ min-dim <>)))
+                      (= screenspace-offset
+                         (-> (window-resolution)
+                             vec2f
+                             (- min-dim)
+                             (/ min-dim <>))))
+                    (= dimensions
+                       (vec2f (window-resolution)))
+                    (= rand-offset
+                       (-> frame-index f32 (* 0.01) cos))
+                    (dispatch-compute-shader update-particles
+                                             (vec3u particle-count 1u 1u))
+                    (dispatch-compute-shader update-grid
+                                             (vec3u grid-size grid-size 1u))
+                    (dispatch-render-shaders fullscreen-vertex
+                                             grid-fragment
+                                             3)
+                    #_(dispatch-render-shaders particle-vertex
+                                               particle-fragment
+                                               (* 6 particle-count))
+                    (+= frame-index 1))))
+

@@ -478,7 +478,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 [[package]]
 name = "easl"
 version = "0.0.0"
-source = "git+https://github.com/Ella-Hoeppner/easl#a2c489d0bf3fea97ad72993a186737bfffb15f03"
+source = "git+https://github.com/Ella-Hoeppner/easl#e3b4b0626c680659c6e6c97cce29c20d246d0367"
 dependencies = [
  "fsexp",
  "lazy_static",

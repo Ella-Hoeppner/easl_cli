@@ -605,17 +605,10 @@ fn run_file(
             last_content = read_source(&input)?;
             println!("\n{} changed, reloading...", input.display());
           } else {
-            // Program finished on its own.  Close any leftover window and
-            // wait for the next file change before rerunning.
+            // Program finished on its own (e.g. user closed the window).
+            // Exit the process rather than keeping the watcher alive.
             close_persistent_window();
-            println!(
-              "Program finished. Watching for changes... (Ctrl+C to stop)"
-            );
-            change_rx
-              .recv()
-              .map_err(|e| format!("Watcher disconnected: {e}"))?;
-            while change_rx.try_recv().is_ok() {}
-            last_content = read_source(&input)?;
+            return Ok(());
           }
         }
       }
