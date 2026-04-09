@@ -2,10 +2,10 @@
      6.28318530718)
 
 (def seed-count: u32
-     500)
+     2000)
 
 (def grid-size: u32
-     1000)
+     400)
 
 (def max-adjacencies: u32
      16)
@@ -113,7 +113,7 @@
                  (vec2i -1i 0i)
                  (vec2i 0i 1i)
                  (vec2i 0i -1i)]
-        @var indeces-to-consider: [20: u32] (zeroed-array)]
+        @var indeces-to-consider: [32: u32] (zeroed-array)]
     (for [i 0u (< i 4) (+= i 1)]
       (let [offset (offsets i)
             offset-coords (+ coords
@@ -411,5 +411,6 @@
                     (dispatch-render-shaders seed-dot-vertex
                                              seed-dot-frag
                                              (* 6 seed-count))
+                    (print (/ (window-delta-time)))
                     (+= frame-index 1))))
 
