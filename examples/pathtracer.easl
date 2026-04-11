@@ -1,0 +1,418 @@
+(def TAU: f32
+     6.28318530718)
+
+(def render-dimensions: u32
+     500)
+
+(def max-bounces: u32
+     16u)
+
+(def camera-distance: f32
+     2.)
+
+(def max-radius: f32
+     0.4)
+
+(def max-object-count: u32
+     65)
+
+(def max-attempt-count: u32
+     1000)
+
+@{group 0
+  binding 0
+  address storage-write}
+(var grid: [vec4f])
+
+@{group 0
+  binding 1
+  address uniform}
+(var screenspace-scale: vec2f)
+
+@{group 0
+  binding 2
+  address uniform}
+(var screenspace-offset: vec2f)
+
+@{group 0
+  binding 3
+  address uniform}
+(var dimensions: vec2f)
+
+@{group 0
+  binding 4
+  address uniform}
+(var rand-offset: f32)
+
+@{group 0
+  binding 5
+  address uniform}
+(var frame-index: u32)
+
+(struct SurfaceCharacteristics
+  color: vec3f
+  luminosity: vec3f
+  specularity: f32
+  transparency: f32
+  index-of-refraction: f32)
+
+(struct Object
+  pos: vec3f
+  r: f32
+  rounding: f32
+  axis: vec3f
+  angle: f32
+  surface: SurfaceCharacteristics)
+
+@{group 0
+  binding 6
+  address storage}
+(var objects: [Object])
+
+(var rand-state: f32
+     0.)
+
+(defn set-rand-seed [x: f32]
+  (= rand-state (+ rand-offset x)))
+
+(defn sigmoid [a: f32]: f32
+  (-> a - (pow 2.718 <>) (+ 1.) /))
+
+(defn rand []: f32
+  (= rand-state
+     (+ rand-state 0.025))
+  (fract (* 43758.5453123
+            (sin (* rand-state 78.233)))))
+
+(defn rand-norm []: vec2f
+  (* (sqrt (* -2. (log (rand))))
+     (cis (* TAU (rand)))))
+
+(defn rand-sphere []: vec3f
+  (normalize (vec3f (rand-norm) (.x (rand-norm)))))
+
+(defn cis [x: f32]: vec2f
+  (vec2f (cos x) (sin x)))
+
+(defn uni->bi [x: f32]: f32
+  (-> x (* 2.) (- 1.)))
+
+(defn uni->bi [x: vec2f]: vec2f
+  (vec2f (uni->bi x.x) (uni->bi x.y)))
+
+(defn bi->uni [x: f32]: f32
+  (-> x (+ 1.) (* 0.5)))
+
+(defn bi->uni [x: vec2f]: vec2f
+  (vec2f (bi->uni x.x) (bi->uni x.y)))
+
+(defn axis-angle-rotation [pos: vec3f
+                           axis: vec3f
+                           angle: f32]: vec3f
+  (let [c (cos angle)
+        s (sin angle)
+        k (normalize axis)]
+    (+ (+ (* pos c) (* (cross k pos) s))
+       (* k (* (dot k pos) (- 1. c))))))
+
+(defn aces-tonemap [rgb: vec3f]: vec3f
+  (clamp (/ (* rgb (+ 0.03 (* 2.51 rgb)))
+            (+ 0.14
+               (* rgb (+ 0.59 (* 2.43 rgb)))))
+         (vec3f 0.)
+         (vec3f 1.)))
+
+(enum (Option T)
+  None
+  (Some T))
+
+(struct Ray
+  pos: vec3f
+  dir: vec3f)
+
+(defn gradient [f: (Fn [vec3f] f32)
+                x: vec3f]: vec3f
+  (- (vec3f (f (+ x (vec3f 0.001 0. 0.)))
+            (f (+ x (vec3f 0. 0.001 0.)))
+            (f (+ x (vec3f 0. 0. 0.001))))
+     (f x)))
+
+(defn raymarch [sdf: (Fn [vec3f] f32)
+                ray: Ray
+                inside: bool]: (Option vec3f)
+  (let [epsilon 0.001
+        inside-factor (if inside
+                        -1.
+                        1.)
+        @var has-left-surface false
+        @var has-been-outside false
+        @var current-dist 0.]
+    (for [i 0u (< i 256) (= i (+ i 1))]
+      (let [current-pos (+ ray.pos
+                           (* ray.dir current-dist))]
+        (when (> (length current-pos)
+                 (max 1. camera-distance))
+          (break))
+        (let [dist (* inside-factor
+                      (sdf current-pos))]
+          (if (< (abs dist) epsilon)
+            (when has-left-surface
+              (return (Some current-pos)))
+            (= has-left-surface true))
+          (when (> dist 0.)
+            (= has-been-outside true))
+          (+= current-dist
+              (* (if has-been-outside
+                   (sign dist)
+                   1.)
+                 (max (abs dist) epsilon))))))
+    None))
+
+(defn sd-box [pos: vec3f
+              size: vec3f]: f32
+  (let [q (- (abs pos) size)]
+    (+ (length (max q (vec3f 0.)))
+       (min 0. (max q.x q.y q.z)))))
+
+(defn sd-object [pos: vec3f
+                 object: Object]: f32
+  (let [radius object.r
+        box-side-length (/ (.r object) (sqrt 3))
+        offset-pos (- pos (.pos object))]
+    (- (sd-box (axis-angle-rotation offset-pos
+                                    object.axis
+                                    object.angle)
+               (vec3f (* box-side-length
+                         (- 1. object.rounding))))
+       (* radius object.rounding))))
+
+(defn scene-sdf [pos: vec3f]: f32
+  (let [@var d 1000000.]
+    (for [i
+          0
+          (< i (array-length objects))
+          (+= i 1)]
+      (= d
+         (min d (sd-object pos (objects i)))))
+    d))
+
+(defn skybox [x: vec3f]: vec3f
+  (-> x
+      (dot (normalize (vec3f 1. 0. -1.)))
+      (smoothstep -0.25 1. <>)
+      (* (vec3f 1.))))
+
+(defn get-surface [x: vec3f]: SurfaceCharacteristics
+  (let [@var closest-d 1000000.
+        @var closest-object (objects 0u)]
+    (for [i
+          0
+          (< i (array-length objects))
+          (+= i 1)]
+      (let [object (objects i)
+            d (- (distance x (.pos object))
+                 (.r object))]
+        (when (< d closest-d)
+          (= closest-d d)
+          (= closest-object object))))
+    closest-object.surface))
+
+@compute
+@{workgroup-size 1}
+(defn update-grid []
+  (set-rand-seed (+ (* 0.0008123
+                       (f32 (.x (global-invocation-id))))
+                    (* -0.00029123
+                       (f32 (.y (global-invocation-id))))))
+  (let [coords (.xy (global-invocation-id))
+        min-dim (min (f32 render-dimensions)
+                     (f32 render-dimensions))
+        screen-pos (-> coords
+                       vec2f
+                       (+ (- (vec2f (rand) (rand)) 0.5))
+                       (/ min-dim)
+                       (- (* 0.5
+                             (- (vec2f render-dimensions)
+                                min-dim)))
+                       uni->bi)
+        @var ray (Ray (vec3f 0. 0. (- camera-distance))
+                      (normalize (vec3f screen-pos 2.)))
+        @var tint (vec3f 1.)
+        @var accumulated-color (vec3f 0.)
+        @var inside false]
+    (for [i
+          0u
+          (< i max-bounces)
+          (+= i 1)]
+      (match (raymarch scene-sdf ray inside)
+        (Some surface-pos) (let [normal (normalize (gradient scene-sdf surface-pos))
+                                 surface (get-surface surface-pos)
+                                 refraction-dir (if inside
+                                                  (do (= inside false)
+                                                      (Some ray.dir))
+                                                  (if (or inside
+                                                          (< (rand) surface.transparency))
+                                                    (let [dir (refract ray.dir
+                                                                       normal
+                                                                       (if inside
+                                                                         surface.index-of-refraction
+                                                                         (/ surface.index-of-refraction)))]
+                                                      (if (all (== dir (vec3f 0.)))
+                                                        None
+                                                        (do (= inside (! inside))
+                                                            (Some dir))))
+                                                    None))]
+                             (+= accumulated-color
+                                 (* (* tint surface.luminosity)
+                                    (-> (dot normal ray.dir) -)))
+                             (*= tint surface.color)
+                             (= ray
+                                (Ray surface-pos
+                                     (match refraction-dir
+                                       (Some refraction-dir) refraction-dir
+                                       None (let [reflection-dir (reflect ray.dir normal)
+                                                  diffuse-dir (normalize (+ reflection-dir (rand-sphere)))]
+                                              (mix diffuse-dir
+                                                   reflection-dir
+                                                   surface.specularity))))))
+        None (do (+= accumulated-color
+                     (* tint (skybox ray.dir)))
+                 (break))))
+    (+= (grid (+ coords.x
+                 (* coords.y render-dimensions)))
+        (vec4f accumulated-color 1.))))
+
+@vertex
+(defn fullscreen-vertex []: vec4f
+  (vec4f (match (vertex-index)
+           0 (vec2f -1.)
+           1 (vec2f -1. 3.)
+           _ (vec2f 3. -1.))
+         0.
+         1.))
+
+@fragment
+(defn grid-fragment []: @{location 0} vec4f
+  (let [pos (-> (position)
+                .xy
+                (vec2f (.x <>)
+                       (- dimensions.y (.y <>)))
+                (- (* 0.5
+                      (- dimensions
+                         (min dimensions.x dimensions.y))))
+                (/ (vec2f dimensions))
+                (/ screenspace-scale))]
+    (if (or (any (< pos (vec2f 0.)))
+            (any (> pos (vec2f 1.))))
+      (vec4f 0.)
+      (-> pos
+          (* (vec2f render-dimensions))
+          vec2u
+          (+ (.x <>)
+             (* render-dimensions (.y <>)))
+          grid
+          (/ (.xyz <>) (.w <>))
+          aces-tonemap
+          (vec4f 1.)))))
+
+(enum SurfaceMode
+  Basic
+  Glass
+  Mirror
+  Light)
+
+@cpu
+(defn main []
+  (= grid
+     (zeroed-array (* render-dimensions
+                      render-dimensions)))
+  (set-rand-seed 0.20)
+  (do (= objects
+         (zeroed-array max-object-count))
+      (let [@var current-object-count 0u]
+        (for [attempt
+              0u
+              (< attempt max-attempt-count)
+              (+= attempt 1)]
+          (when (>= current-object-count
+                    max-object-count)
+            (break))
+          (let [pos (* (rand-sphere)
+                       (pow (rand) (/ 3)))
+                @var max-object-radius (min max-radius
+                                            (- 1. (length pos)))]
+            (for [i
+                  0u
+                  (< i current-object-count)
+                  (+= i 1)]
+              (let [object (objects i)]
+                (= max-object-radius
+                   (min max-object-radius
+                        (- (distance object.pos pos)
+                           object.r)))
+                (when (< max-object-radius 0.)
+                  (break))))
+            (when (< max-object-radius 0.)
+              (continue))
+            (= (objects current-object-count)
+               (Object pos
+                       max-object-radius
+                       (rand)
+                       (rand-sphere)
+                       0.5
+                       (if (> max-object-radius 0.25)
+                         ; Mirror
+
+                         (SurfaceCharacteristics (vec3f 1.)
+                                                 (vec3f 0.)
+                                                 1.
+                                                 0.
+                                                 1.)
+                         (if (and (> max-object-radius 0.05)
+                                  (< (rand) 0.25))
+                           ; Glass
+
+                           (SurfaceCharacteristics (vec3f 1.)
+                                                   (vec3f 0.)
+                                                   1.
+                                                   1.
+                                                   1.2)
+                           ; Diffuse surface, possibly glowing
+
+                           (let [color (pow (vec3f (rand) (rand) (rand))
+                                            (vec3f 3.))]
+                             (SurfaceCharacteristics color
+                                                     (if (< (rand) 0.5)
+                                                       color
+                                                       (vec3f 0.))
+                                                     0.
+                                                     0.
+                                                     1.2))))))
+            (+= current-object-count 1)
+            (print [current-object-count attempt])))))
+  (spawn-window (fn []
+                    (let [min-dim (-> (window-resolution)
+                                      (min (.x <>) (.y <>))
+                                      f32)]
+                      (= screenspace-scale
+                         (-> (window-resolution)
+                             vec2f
+                             (/ min-dim <>)))
+                      (= screenspace-offset
+                         (-> (window-resolution)
+                             vec2f
+                             (- min-dim)
+                             (/ min-dim <>))))
+                    (= dimensions
+                       (vec2f (window-resolution)))
+                    (= rand-offset
+                       (-> frame-index f32 (* 0.01) cos))
+                    (dispatch-compute-shader update-grid
+                                             (vec3u render-dimensions
+                                                    render-dimensions
+                                                    1u))
+                    (dispatch-render-shaders fullscreen-vertex
+                                             grid-fragment
+                                             3)
+                    (+= frame-index 1))))
+
