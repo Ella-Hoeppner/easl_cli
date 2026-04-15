@@ -81,24 +81,24 @@
 (defn position-seeds [@{builtin global-invocation-id}
                       id: vec3u]
   (= (seeds id.x)
-     (-> (vec4f (let [base-pos (vec2f (rand (/ (f32 id.x)
-                                               (- (f32 seed-count) 1)))
-                                      (rand (+ (/ (+ (f32 id.x) 0.5)
-                                                  (- (f32 seed-count) 1))
-                                               0.2711)))
-                      base-angle (* TAU
-                                    (rand (+ (/ (+ (f32 id.x) 0.5)
-                                                (- (f32 seed-count) 1))
-                                             -0.1992)))
-                      spin-radius 0.1]
-                  (+ (* (- 1. spin-radius)
-                        (uni->bi base-pos))
-                     (* spin-radius
-                        (cis (+ base-angle
-                                0.6
-                                (* (f32 frame-index) 0.01))))))
-                0.
-                0.))))
+     (vec4f (let [base-pos (vec2f (rand (/ (f32 id.x)
+                                           (- (f32 seed-count) 1)))
+                                  (rand (+ (/ (+ (f32 id.x) 0.5)
+                                              (- (f32 seed-count) 1))
+                                           0.2711)))
+                  base-angle (* TAU
+                                (rand (+ (/ (+ (f32 id.x) 0.5)
+                                            (- (f32 seed-count) 1))
+                                         -0.1992)))
+                  spin-radius 0.1]
+              (+ (* (- 1. spin-radius)
+                    (uni->bi base-pos))
+                 (* spin-radius
+                    (cis (+ base-angle
+                            0.6
+                            (* (f32 frame-index) 0.01))))))
+            0.
+            0.)))
 
 (defn coords->grid-index [coords: vec2i]: i32
   (+ coords.x
@@ -168,19 +168,24 @@
                (vec4u seed-index
                       current-indeces.xyz))
             (continue))
-          (when (< d current-distances.y)
+          (when (and (< d current-distances.y)
+                     (not (any (== current-indeces.x seed-index))))
             (= current-distances.yzw
                (vec3f d current-distances.yz))
             (= current-indeces.yzw
                (vec3u seed-index current-indeces.yz))
             (continue))
-          (when (< d current-distances.z)
+          (when (and (< d current-distances.z)
+                     (not (any (== current-indeces.xy
+                                   (vec2u seed-index)))))
             (= current-distances.zw
                (vec2f d current-distances.z))
             (= current-indeces.zw
                (vec2u seed-index current-indeces.z))
             (continue))
-          (when (< d current-distances.w)
+          (when (and (< d current-distances.w)
+                     (not (any (== current-indeces.xyz
+                                   (vec3u seed-index)))))
             (= current-distances.w d)
             (= current-indeces.w seed-index)
             (continue)))))
@@ -355,7 +360,7 @@
                    (* (f32 grid-size))
                    vec2i)
         grid-value (grid (coords->grid-index coords))]
-    (vec4f (vec3f (/ (vec3f grid-value.xyz)
+    (vec4f (vec3f (/ (f32 grid-value.x)
                      (f32 seed-count)))
            1.)))
 
