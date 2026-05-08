@@ -1,24 +1,24 @@
 use clap::{Parser, Subcommand};
-#[cfg(feature = "interpreter")]
-use easl::compiler::builtins::built_in_macros;
-#[cfg(feature = "interpreter")]
-use easl::compiler::program::Program;
-#[cfg(feature = "interpreter")]
-use easl::interpreter::{
-  close_persistent_window, run_program_entry, run_program_entry_with_io,
-  IOManager, StdoutIO,
+use easl::compiler::core::{
+  compile_easl_file_to_wgsl, load_easl_program_from_file,
 };
 #[cfg(feature = "interpreter")]
-use easl::parse::parse_easl_without_comments;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use easl::{compile_easl_source_to_wgsl, format_easl_source};
+use easl::compiler::program::Program;
+use easl::format_easl_source;
+#[cfg(feature = "interpreter")]
+use easl::interpreter::{
+  IOManager, StdoutIO, close_persistent_window, run_program_entry_from_path,
+  run_program_entry_with_io_from_path,
+};
+use easl::parse::EaslMultiDocument;
 use notify::{
   Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 
 #[derive(Parser)]
@@ -87,41 +87,49 @@ fn read_source(input: &PathBuf) -> Result<String, String> {
   })
 }
 
-#[cfg(feature = "interpreter")]
-fn try_get_validated_easl_program(
-  easl_source: &str,
-) -> Result<Program, String> {
-  let document = parse_easl_without_comments(easl_source);
-  let (mut program, errors) =
-    Program::from_easl_document(&document, built_in_macros());
-  if !errors.is_empty() {
-    return Err(errors.describe(&document));
+fn describe_parse_failures(failed_documents: &EaslMultiDocument) -> String {
+  let mut descriptions = vec![];
+  for (doc, _, source) in &failed_documents.sources {
+    for err in &doc.parsing_failures {
+      descriptions.push(err.describe(doc, source));
+    }
   }
-  let errors = program.validate_raw_program();
-  if !errors.is_empty() {
-    return Err(errors.describe(&document));
-  }
-  Ok(program)
+  descriptions.join("\n\n")
 }
 
-fn try_compile_easl(easl_source: &str) -> Result<String, String> {
-  match compile_easl_source_to_wgsl(easl_source) {
+fn try_compile_easl_file(input: &Path) -> Result<String, String> {
+  match compile_easl_file_to_wgsl(input)
+    .map_err(|e| format!("IO error reading {}: {}", input.display(), e))?
+  {
     Ok(Ok(wgsl)) => Ok(wgsl),
-    Ok(Err((document, errors))) => Err(format!(
+    Ok(Err((documents, errors))) => Err(format!(
       "Compilation failed due to errors:\n\n{}",
-      errors.describe(&document)
+      errors.describe(&documents)
     )),
-    Err(mut failed_document) => {
-      Err(format!("Compilation failed due to parsing error:\n\n{}", {
-        let mut errors = vec![];
-        std::mem::swap(&mut errors, &mut failed_document.parsing_failures);
-        errors
-          .into_iter()
-          .map(|err| err.describe(&failed_document))
-          .collect::<Vec<String>>()
-          .join("\n\n")
-      }))
+    Err(failed_documents) => Err(format!(
+      "Compilation failed due to parsing error:\n\n{}",
+      describe_parse_failures(&failed_documents)
+    )),
+  }
+}
+
+#[cfg(feature = "interpreter")]
+fn try_get_validated_easl_program(input: &Path) -> Result<Program, String> {
+  match load_easl_program_from_file(input)
+    .map_err(|e| format!("IO error reading {}: {}", input.display(), e))?
+  {
+    Ok((documents, Ok(mut program))) => {
+      let errors = program.validate_raw_program();
+      if !errors.is_empty() {
+        return Err(errors.describe(&documents));
+      }
+      Ok(program)
     }
+    Ok((documents, Err(errors))) => Err(errors.describe(&documents)),
+    Err(failed_documents) => Err(format!(
+      "Compilation failed due to parsing error:\n\n{}",
+      describe_parse_failures(&failed_documents)
+    )),
   }
 }
 
@@ -152,10 +160,8 @@ fn compile_single_file(
   input: PathBuf,
   output: Option<PathBuf>,
 ) -> Result<(), String> {
-  let easl_source = read_source(&input)?;
-
   println!("Compiling {}...", input.display());
-  match try_compile_easl(&easl_source) {
+  match try_compile_easl_file(&input) {
     Ok(wgsl) => {
       let output_path = output.unwrap_or_else(|| {
         let mut output_path = input.clone();
@@ -376,9 +382,8 @@ fn compile_once(
 }
 
 fn check_single_file(input: PathBuf) -> Result<(), String> {
-  let easl_source = read_source(&input)?;
   print!("Typechecking {}...   ", input.display());
-  match try_compile_easl(&easl_source) {
+  match try_compile_easl_file(&input) {
     Ok(_) => {
       println!("✅");
       Ok(())
@@ -432,7 +437,12 @@ fn format_single_file(
 ) -> Result<(), String> {
   let easl_source = read_source(&input)?;
   println!("Formatting {}...", input.display());
-  let formatted = format_easl_source(&easl_source);
+  let formatted = format_easl_source(&easl_source).map_err(|_| {
+    format!(
+      "Failed to format {}: source has parse errors",
+      input.display()
+    )
+  })?;
   let output_path = output.unwrap_or_else(|| input.clone());
   fs::write(&output_path, formatted).map_err(|e| {
     format!(
@@ -531,9 +541,11 @@ fn run_file(
     let (notify_tx, notify_rx) = channel();
     let mut watcher = RecommendedWatcher::new(notify_tx, Config::default())
       .map_err(|e| format!("Error: Failed to create file watcher\n{}", e))?;
-    watcher.watch(&input, RecursiveMode::NonRecursive).map_err(|e| {
-      format!("Error: Failed to watch path {}\n{}", input.display(), e)
-    })?;
+    watcher
+      .watch(&input, RecursiveMode::NonRecursive)
+      .map_err(|e| {
+        format!("Error: Failed to watch path {}\n{}", input.display(), e)
+      })?;
 
     {
       let reload_flag = Arc::clone(&reload_flag);
@@ -542,7 +554,10 @@ fn run_file(
         let mut last = fs::read_to_string(&input).unwrap_or_default();
         loop {
           match notify_rx.recv() {
-            Ok(Ok(Event { kind: EventKind::Modify(_), .. })) => {
+            Ok(Ok(Event {
+              kind: EventKind::Modify(_),
+              ..
+            })) => {
               if let Ok(content) = fs::read_to_string(&input) {
                 if content != last {
                   last = content;
@@ -559,13 +574,12 @@ fn run_file(
     }
 
     let mut io = StdoutIO::with_reload_flag(Arc::clone(&reload_flag));
-    let mut last_content = read_source(&input)?;
 
     println!("Watching for changes... (Press Ctrl+C to stop)");
 
     loop {
-      // Compile current source.
-      let program = match try_get_validated_easl_program(&last_content) {
+      // Compile current source (re-reads file and chases imports each time).
+      let program = match try_get_validated_easl_program(&input) {
         Ok(p) => p,
         Err(e) => {
           eprintln!("Compilation error:\n{e}");
@@ -574,7 +588,6 @@ fn run_file(
             .recv()
             .map_err(|e| format!("Watcher disconnected: {e}"))?;
           while change_rx.try_recv().is_ok() {}
-          last_content = read_source(&input)?;
           continue;
         }
       };
@@ -584,7 +597,12 @@ fn run_file(
 
       // Run the program.  The same `io` is reused across reloads so the
       // reload_flag Arc is still wired up.
-      match run_program_entry_with_io(program, entry.as_deref(), io) {
+      match run_program_entry_with_io_from_path(
+        program,
+        entry.as_deref(),
+        io,
+        &input,
+      ) {
         Err(e) => {
           eprintln!("Runtime error: {e:?}");
           close_persistent_window();
@@ -594,15 +612,12 @@ fn run_file(
             .recv()
             .map_err(|e| format!("Watcher disconnected: {e}"))?;
           while change_rx.try_recv().is_ok() {}
-          last_content = read_source(&input)?;
         }
         Ok((returned_io, did_reload)) => {
           io = returned_io;
           if did_reload {
-            // File already changed — drain any buffered notifications and
-            // re-read; no need to block.
+            // File already changed — drain any buffered notifications.
             while change_rx.try_recv().is_ok() {}
-            last_content = read_source(&input)?;
             println!("\n{} changed, reloading...", input.display());
           } else {
             // Program finished on its own (e.g. user closed the window).
@@ -614,9 +629,12 @@ fn run_file(
       }
     }
   } else {
-    let easl_source = read_source(&input)?;
-    let program = try_get_validated_easl_program(&easl_source)?;
-    match run_program_entry(program, entry.as_ref().map(|s| s.as_str())) {
+    let program = try_get_validated_easl_program(&input)?;
+    match run_program_entry_from_path(
+      program,
+      entry.as_ref().map(|s| s.as_str()),
+      &input,
+    ) {
       Err(e) => return Err(format!("{e:?}")),
       _ => {}
     }
