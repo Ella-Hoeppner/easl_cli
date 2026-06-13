@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+#[cfg(feature = "interpreter")]
+use easl::CompilerTarget;
 use easl::compiler::core::{
   compile_easl_file_to_wgsl, load_easl_program_from_file,
 };
@@ -119,7 +121,7 @@ fn try_get_validated_easl_program(input: &Path) -> Result<Program, String> {
     .map_err(|e| format!("IO error reading {}: {}", input.display(), e))?
   {
     Ok((documents, Ok(mut program))) => {
-      let errors = program.validate_raw_program();
+      let errors = program.validate_raw_program(CompilerTarget::WGSL);
       if !errors.is_empty() {
         return Err(errors.describe(&documents));
       }
