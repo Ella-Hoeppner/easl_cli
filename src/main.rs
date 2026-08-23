@@ -5,6 +5,8 @@ use easl::compiler::core::{
   compile_easl_file_to_wgsl, load_easl_program_from_file,
 };
 #[cfg(feature = "interpreter")]
+use easl::compiler::entry::EntryPoint;
+#[cfg(feature = "interpreter")]
 use easl::compiler::program::Program;
 use easl::format_easl_source;
 #[cfg(feature = "interpreter")]
@@ -593,6 +595,18 @@ fn run_file(
           continue;
         }
       };
+
+      // The audio stream deliberately persists across reloads — the new
+      // run's `start-audio` hot-swaps the running stream's program instead
+      // of tearing it down (no device re-open, no gap in playback). But if
+      // the reloaded program has no audio entry at all, nothing will ever
+      // swap it, so stop the stale stream here.
+      if program
+        .find_fn_names_by_entry_point(|e| e == EntryPoint::Audio)
+        .is_empty()
+      {
+        easl::audio::stop_audio();
+      }
 
       // Reset IO state (clears GPU handle and reload flag) before each run.
       io.reset_for_reload();

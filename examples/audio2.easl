@@ -1,0 +1,388 @@
+(def TAU: f32
+     6.283185)
+
+(defn cis [x: f32]: vec2f
+  (vec2f (cos x) (sin x)))
+
+(var rand-state: f32)
+
+(defn set-rand-seed [x: f32]: ()
+  (= rand-state x))
+
+(defn hash [@var x: u32]: u32
+  (+= x (<< x 10))
+  (= x (^ x (>> x 6)))
+  (+= x (<< x 3))
+  (= x (^ x (>> x 11)))
+  (+= x (<< x 15))
+  x)
+
+(defn rand []: f32
+  ; based on https://amindforeverprogramming.blogspot.com/2013/07/random-floats-in-glsl-330.html
+
+  (= rand-state
+     (+ rand-state 0.025))
+  (let [mantissa-mask 8388607u
+        one 1065353216u]
+    (-> rand-state
+        (bitcast <>): u32
+        hash
+        (& mantissa-mask)
+        (| one)
+        (bitcast <>): f32
+        (- 1.))))
+
+(defn rand [maximum: f32]: f32
+  (* maximum (rand)))
+
+(defn rand [minimum: f32
+            maximum: f32]: f32
+  (+ minimum
+     (* (- maximum minimum) (rand))))
+
+(defn rand [maximum: u32]: u32
+  (u32 (* (f32 maximum) (rand))))
+
+(defn rand-dir []: vec2f
+  (cis (* (rand) TAU)))
+
+(defn rand-exp []: f32
+  (- (log (rand))))
+
+(defn rand-norm []: vec2f
+  (* (sqrt (* -2. (log (rand))))
+     (cis (* TAU (rand)))))
+
+(defn (last T
+            C: u32)
+      [a: [C: T]]: T
+      (a (- (array-length a) 1)))
+
+(defn slider [x: f32]: f32
+  x)
+
+(defn uni->bi [x: f32]: f32
+  (-> x (* 2.) (- 1.)))
+
+(defn bi->uni [x: f32]: f32
+  (-> x (+ 1.) (* 0.5)))
+
+(var filter: f32)
+
+(defn osc [x: f32]: f32
+  (sin (* TAU x)))
+
+(defn square [x: f32]: f32
+  (if (< (% x 1.) 0.5)
+    1.
+    -1.))
+
+(defn saw [x: f32]: f32
+  (-> x
+      (+ (ceil x))
+      (+ 0.5)
+      (% 1.)
+      (* 2.)
+      (- 1.)))
+
+(defn sympow [x: f32
+              p: f32]: f32
+  (* (sign x) (pow (abs x) p)))
+
+(defn beat [t: f32
+            squish: f32
+            sympow-factor: f32]: f32
+  (-> t
+      osc
+      bi->uni
+      (pow squish)
+      uni->bi
+      (sympow sympow-factor)
+      bi->uni))
+
+(defn (fm-update C: u32)
+      [@var @ref state: [C: f32]
+       stages: [C: vec2f]
+       t: f32
+       dt: f32]: ()
+      (for [i (array-length state)]
+        (let [stage (stages i)]
+          (+= (state i)
+              (* dt
+                 (pow (sqrt stage.x)
+                      (osc (* stage.y
+                              (if (== i 0)
+                                t
+                                (state (- i 1)))))))))))
+
+(var main-fm-state: [2: f32])
+
+(var drum-fm-state: [3: f32])
+
+(defn bump [x: f32]: f32
+  (if (< (abs x) 1.)
+    (exp (/ (- (* x x) 1)))
+    0.))
+
+(var main-synth-fm-state: [3: f32])
+
+(defn mix-exp [low: f32
+               high: f32
+               p: f32]: f32
+  (* low (pow (/ high low) p)))
+
+(defn adsr [t: f32
+            note-length: f32
+            params: vec4f]: f32
+  (let [a params.x
+        d params.y
+        s params.z
+        r params.w]
+    (if (< t 0.)
+      0.
+      (if (< t a)
+        (/ t a)
+        (if (< t (+ a d))
+          (mix 1. s (/ (- t a) d))
+          (if (< t note-length)
+            s
+            (if (< t (+ note-length r))
+              (mix s 0. (- t note-length))
+              0.)))))))
+
+(defn hooke-attract [@var @ref state: vec2f
+                     target: f32
+                     force: f32
+                     drag: f32
+                     dt: f32]: f32
+  (let [diff (- target state.x)]
+    (+= state.y (* dt force diff))
+    (*= state.y (pow drag dt))
+    (+= state.x (* dt state.y)))
+  state.x)
+
+#_(defn audio []: f32
+    #_(-> t (* 6) (* 440) cos))
+
+(defn (map I
+           O
+           C: u32)
+      [f: (Fn [I] O)
+       arr: [C: I]]: [C: O]
+      (let [@var new-arr (zeroed-array)]
+        (for [i (array-length arr)]
+          (= (new-arr i) (f (arr i))))
+        new-arr))
+
+(defn bump-envelope [t: f32]: f32
+  (-> t uni->bi bump))
+
+(var biquad-1: BiquadState)
+
+(var biquad-2: BiquadState)
+
+(var biquad-3: BiquadState)
+
+(var biquad-4: BiquadState)
+
+(var biquad-5: BiquadState)
+
+(var biquad-6: BiquadState)
+
+(var biquad-7: BiquadState)
+
+(var biquad-8: BiquadState)
+
+(var last-frequency-offset-stage: u32)
+
+(struct BiquadParameters
+  cutoff: f32
+  ; in Hz
+
+  q: f32
+  lp: f32
+  ; the three numerator-space mix knobs
+
+  bp: f32
+  hp: f32)
+
+(struct BiquadState
+  s1: f32
+  s2: f32)
+
+(defn update-biquad [signal: f32
+                     @var @ref state: BiquadState
+                     params: BiquadParameters]: f32
+  (let [w0 (* TAU params.cutoff (/ 44100.))
+        cs (cos w0)
+        alpha (/ (sin w0) (* 2. params.q))
+        a0 (+ 1. alpha)
+        a1 (/ (* -2. cs) a0)
+        a2 (/ (- 1. alpha) a0)
+        lp-shape (* 0.5 (- 1. cs))
+        ; (1-c)/2: zeros at Nyquist
+
+        hp-shape (* 0.5 (+ 1. cs))
+        ; (1+c)/2: zeros at DC
+
+        b0 (/ (+ (* params.lp lp-shape)
+                 (* params.bp alpha)
+                 (* params.hp hp-shape))
+              a0)
+        b1 (/ (- (* 2. params.lp lp-shape)
+                 (* 2. params.hp hp-shape))
+              a0)
+        b2 (/ (- (+ (* params.lp lp-shape)
+                    (* params.hp hp-shape))
+                 (* params.bp alpha))
+              a0)
+        y (+ (* b0 signal) state.s1)]
+    (= state.s1
+       (- (+ (* b1 signal) state.s2)
+          (* a1 y)))
+    (= state.s2
+       (- (* b2 signal) (* a2 y)))
+    y))
+
+(defn update-biquad-svf [signal: f32
+                         @var @ref state: BiquadState
+                         params: BiquadParameters]: f32
+  (let [g (tan (* 0.5
+                  TAU
+                  params.cutoff
+                  (/ 44100.)))
+        k (/ 1. params.q)
+        a1 (/ 1. (+ 1. (* g (+ g k))))
+        a2 (* g a1)
+        a3 (* g a2)
+        v3 (- signal state.s2)
+        v1 (+ (* a1 state.s1) (* a2 v3))
+        v2 (+ state.s2
+              (* a2 state.s1)
+              (* a3 v3))
+        high (- signal (+ (* k v1) v2))]
+    (= state.s1
+       (- (* 2. v1) state.s1))
+    (= state.s2
+       (- (* 2. v2) state.s2))
+    (+ (* params.lp v2)
+       (* params.bp v1)
+       (* params.hp high))))
+
+@cpu
+(defn main []: ()
+  (let [fundamental-state: vec2f (vec2f 0.)
+        volume-state: vec2f (vec2f 0.)
+        secondary-synth-state: [2: f32] (zeroed-array)
+        main-synth-state: [2: f32] (zeroed-array)]
+    (start-audio (fn []
+                     (let [dt (/ (sample-rate))
+                           control-t (* (audio-time) 4.)
+                           raw-melody-index (u32 control-t)
+                           melody [(vec2f 0. 0.4)
+                                   (vec2f 0. 0.6)
+                                   (vec2f 0. 0.4)
+                                   (vec2f 2. 0.4)
+                                   (vec2f 2. 0.5)
+                                   (vec2f 1. 0.7)
+                                   (vec2f 1.333 0.5)
+                                   (vec2f 1. 0.6)]
+                           melody-index (% raw-melody-index
+                                           (array-length melody))
+                           phase-index (/ raw-melody-index
+                                          (array-length melody))
+                           distortion-factor (-> (* (/ control-t
+                                                       (f32 (array-length melody)))
+                                                    (/ 16.))
+                                                 (+ -0.25)
+                                                 osc
+                                                 (* 1.5)
+                                                 tanh
+                                                 bi->uni)
+                           song-stage-factor (-> (osc (+ -0.25
+                                                         (* (/ control-t
+                                                               (f32 (array-length melody)))
+                                                            (/ 64))))
+                                                 (sympow 0.25)
+                                                 bi->uni)
+                           fundamental-target (* (if (< (% phase-index 4) 2)
+                                                   80.
+                                                   75.)
+                                                 (pow 1.01
+                                                      (osc (* (/ control-t
+                                                                 (f32 (array-length melody)))
+                                                              (/ 8))))
+                                                 (pow 2. (.x (melody melody-index))))
+                           volume-target (.y (melody melody-index))
+                           fundamental (hooke-attract fundamental-state
+                                                      fundamental-target
+                                                      1000000.
+                                                      0.01
+                                                      dt)
+                           volume (clamp (/ (hooke-attract volume-state
+                                                           volume-target
+                                                           12500000.
+                                                           0.01
+                                                           dt)
+                                            (+ 1.
+                                               (* (* (mix-exp -0.00000000001
+                                                              (mix-exp -0.0000000001
+                                                                       -0.00000000025
+                                                                       song-stage-factor)
+                                                              distortion-factor))
+                                                  (* fundamental-state.y
+                                                     fundamental-state.y))))
+                                         -1.
+                                         1.)]
+                       (corrected-fm-update main-synth-state
+                                            [(vec2f 2. (* fundamental 1.5))
+                                             (vec2f 2.5 (* fundamental 3.))]
+                                            (* (audio-time) fundamental)
+                                            dt)
+                       (corrected-fm-update secondary-synth-state
+                                            [(vec2f 400000. 2.)
+                                             (vec2f 200000. 3.)]
+                                            1.
+                                            dt)
+                       (let [raw-sample (-> (osc (last main-synth-state))
+                                            (mix 1. <> song-stage-factor)
+                                            (sympow (mix-exp 0.9 0.1 distortion-factor))
+                                            (* volume))]
+                         (= filter
+                            (mix filter
+                                 raw-sample
+                                 (mix 0.2
+                                      (mix-exp 0.9
+                                               0.3
+                                               (pow distortion-factor 1.3))
+                                      song-stage-factor))))
+                       filter))))
+  (spawn-window (fn [] ())))
+
+; LLM-written code, be careful
+(defn bessel-i0 [z: f32]: f32
+  (let [q (* 0.25 (* z z))
+        @var term 1.
+        @var sum 1.]
+    (for [k 9u]
+      (let [k1 (f32 (+ k 1u))]
+        (*= term (/ q (* k1 k1)))
+        (+= sum term)))
+    sum))
+
+(defn (corrected-fm-update C: u32)
+      [@var @ref state: [C: f32]
+       stages: [C: vec2f]
+       t: f32
+       dt: f32]: ()
+      (for [i (array-length state)]
+        (let [stage (stages i)
+              correction (bessel-i0 (* 0.5 (log stage.x)))]
+          (+= (state i)
+              (* (/ dt correction)
+                 (* stage.y
+                    (pow (sqrt stage.x)
+                         (osc (if (== i 0)
+                                t
+                                (state (- i 1)))))))))))
+

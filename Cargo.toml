@@ -12,7 +12,7 @@ default = ["interpreter"]
 interpreter = ["easl/window"]
 
 [dependencies]
-easl =  { git = "https://github.com/Ella-Hoeppner/easl" }
+easl = { git = "https://github.com/Ella-Hoeppner/easl" }
 clap = { version = "4.0", features = ["derive"] }
 notify = "8.2.0"
 
