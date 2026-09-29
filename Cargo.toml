@@ -8,13 +8,22 @@ name = "easl"
 path = "src/main.rs"
 
 [features]
-default = ["interpreter"]
+default = ["interpreter", "web"]
 interpreter = ["easl/window"]
+# `easl compile --web`. Building it builds easl's web runtime to
+# WebAssembly, which needs the wasm32 target
+# (`rustup target add wasm32-unknown-unknown`).
+web = ["dep:wasm-bindgen-cli-support", "dep:serde_json"]
 
 [dependencies]
-easl = { git = "https://github.com/Ella-Hoeppner/easl" }
+easl = { git = "https://github.com/Ella-Hoeppner/easl", features = ["window", "video"] }
 clap = { version = "4.0", features = ["derive"] }
 notify = "8.2.0"
+
+[build-dependencies]
+# Must match the `wasm-bindgen` version easl's web runtime pins.
+wasm-bindgen-cli-support = { version = "=0.2.129", optional = true }
+serde_json = { version = "1", optional = true }
 
 [profile.release]
 # debug = true

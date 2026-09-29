@@ -66,10 +66,10 @@
                        (* (/ dimensions
                              (min dimensions.x dimensions.y))))
         base-scene-sdf (fn [pos: vec3f]: f32
-                           (sd-torus pos.xzy (vec2f 0.5 0.2)))
+                         (sd-torus pos.xzy (vec2f 0.5 0.2)))
         twisted-scene-sdf (fn [pos: vec3f]: f32
-                              (* 0.4
-                                 (op-twist base-scene-sdf pos)))
+                            (* 0.4
+                               (op-twist base-scene-sdf pos)))
         camera-ray (Ray (vec3f 0. 0. -1.)
                         (normalize (vec3f screen-pos 1.)))
         surface-dist (raymarch twisted-scene-sdf camera-ray)]
@@ -89,10 +89,10 @@
 @cpu
 (defn main []
   (spawn-window (fn []
-                    (= dimensions
-                       (vec2f (window-resolution)))
-                    (= twist-constant
-                       (+ 5.
-                          (* 5. (cos (* 3. (window-time))))))
-                    (dispatch-render-shaders vertex fragment 3))))
+                  (= dimensions
+                     (vec2f (window-resolution)))
+                  (= twist-constant
+                     (+ 5.
+                        (* 5. (cos (* 3. (window-time))))))
+                  (dispatch-render-shaders vertex fragment 3))))
 

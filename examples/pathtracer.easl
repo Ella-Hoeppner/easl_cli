@@ -69,6 +69,7 @@
   address storage}
 (var objects: [Object])
 
+@local
 (var rand-state: f32
      0.)
 
@@ -121,10 +122,6 @@
                (* rgb (+ 0.59 (* 2.43 rgb)))))
          (vec3f 0.)
          (vec3f 1.)))
-
-(enum (Option T)
-  None
-  (Some T))
 
 (struct Ray
   pos: vec3f
@@ -179,9 +176,10 @@
   (let [radius object.r
         box-side-length (/ (.r object) (sqrt 3))
         offset-pos (- pos (.pos object))]
-    (- (sd-box (axis-angle-rotation offset-pos
-                                    object.axis
-                                    object.angle)
+    (- (sd-box (axis-angle-rotation
+                 offset-pos
+                 object.axis
+                 object.angle)
                (vec3f (* box-side-length
                          (- 1. object.rounding))))
        (* radius object.rounding))))
@@ -245,21 +243,29 @@
           (< i max-bounces)
           (+= i 1)]
       (match (raymarch scene-sdf ray inside)
-        (Some surface-pos) (let [normal (normalize (gradient scene-sdf surface-pos))
+        (Some surface-pos) (let [normal (normalize
+                                          (gradient scene-sdf surface-pos))
                                  surface (get-surface surface-pos)
                                  refraction-dir (if inside
                                                   (do (= inside false)
                                                       (Some ray.dir))
-                                                  (if (or inside
-                                                          (< (rand) surface.transparency))
-                                                    (let [dir (refract ray.dir
-                                                                       normal
-                                                                       (if inside
-                                                                         surface.index-of-refraction
-                                                                         (/ surface.index-of-refraction)))]
-                                                      (if (all (== dir (vec3f 0.)))
+                                                  (if (or
+                                                        inside
+                                                        (<
+                                                          (rand)
+                                                          surface.transparency))
+                                                    (let [dir (refract
+                                                                ray.dir
+                                                                normal
+                                                                (if inside
+                                                                  surface.index-of-refraction
+                                                                  (/
+                                                                    surface.index-of-refraction)))]
+                                                      (if (all
+                                                            (== dir (vec3f 0.)))
                                                         None
-                                                        (do (= inside (! inside))
+                                                        (do (= inside
+                                                               (! inside))
                                                             (Some dir))))
                                                     None))]
                              (+= accumulated-color
@@ -267,14 +273,18 @@
                                     (-> (dot normal ray.dir) -)))
                              (*= tint surface.color)
                              (= ray
-                                (Ray surface-pos
-                                     (match refraction-dir
-                                       (Some refraction-dir) refraction-dir
-                                       None (let [reflection-dir (reflect ray.dir normal)
-                                                  diffuse-dir (normalize (+ reflection-dir (rand-sphere)))]
-                                              (mix diffuse-dir
-                                                   reflection-dir
-                                                   surface.specularity))))))
+                                (Ray
+                                  surface-pos
+                                  (match refraction-dir
+                                    (Some refraction-dir) refraction-dir
+                                    None (let [reflection-dir (reflect ray.dir
+                                                                       normal)
+                                               diffuse-dir (normalize
+                                                             (+ reflection-dir
+                                                                (rand-sphere)))]
+                                           (mix diffuse-dir
+                                                reflection-dir
+                                                surface.specularity))))))
         None (do (+= accumulated-color
                      (* tint (skybox ray.dir)))
                  (break))))
@@ -362,57 +372,59 @@
                        0.5
                        (if (> max-object-radius 0.25)
                          ; Mirror
-
-                         (SurfaceCharacteristics (vec3f 1.)
-                                                 (vec3f 0.)
-                                                 1.
-                                                 0.
-                                                 1.)
+                         (SurfaceCharacteristics
+                           (vec3f 1.)
+                           (vec3f 0.)
+                           1.
+                           0.
+                           1.)
                          (if (and (> max-object-radius 0.05)
                                   (< (rand) 0.25))
                            ; Glass
-
-                           (SurfaceCharacteristics (vec3f 1.)
-                                                   (vec3f 0.)
-                                                   1.
-                                                   1.
-                                                   1.2)
+                           (SurfaceCharacteristics
+                             (vec3f 1.)
+                             (vec3f 0.)
+                             1.
+                             1.
+                             1.2)
                            ; Diffuse surface, possibly glowing
-
                            (let [color (pow (vec3f (rand) (rand) (rand))
                                             (vec3f 3.))]
-                             (SurfaceCharacteristics color
-                                                     (if (< (rand) 0.5)
-                                                       color
-                                                       (vec3f 0.))
-                                                     0.
-                                                     0.
-                                                     1.2))))))
+                             (SurfaceCharacteristics
+                               color
+                               (if (< (rand) 0.5)
+                                 color
+                                 (vec3f 0.))
+                               0.
+                               0.
+                               1.2))))))
             (+= current-object-count 1)
             (print [current-object-count attempt])))))
   (spawn-window (fn []
-                    (let [min-dim (-> (window-resolution)
-                                      (min (.x <>) (.y <>))
-                                      f32)]
-                      (= screenspace-scale
-                         (-> (window-resolution)
-                             vec2f
-                             (/ min-dim <>)))
-                      (= screenspace-offset
-                         (-> (window-resolution)
-                             vec2f
-                             (- min-dim)
-                             (/ min-dim <>))))
-                    (= dimensions
-                       (vec2f (window-resolution)))
-                    (= rand-offset
-                       (-> frame-index f32 (* 0.01) cos))
-                    (dispatch-compute-shader update-grid
-                                             (vec3u render-dimensions
-                                                    render-dimensions
-                                                    1u))
-                    (dispatch-render-shaders fullscreen-vertex
-                                             grid-fragment
-                                             3)
-                    (+= frame-index 1))))
+                  (let [min-dim (-> (window-resolution)
+                                    (min (.x <>) (.y <>))
+                                    f32)]
+                    (= screenspace-scale
+                       (-> (window-resolution)
+                           vec2f
+                           (/ min-dim <>)))
+                    (= screenspace-offset
+                       (-> (window-resolution)
+                           vec2f
+                           (- min-dim)
+                           (/ min-dim <>))))
+                  (= dimensions
+                     (vec2f (window-resolution)))
+                  (= rand-offset
+                     (-> frame-index f32 (* 0.01) cos))
+                  (dispatch-compute-shader
+                    update-grid
+                    (vec3u render-dimensions
+                           render-dimensions
+                           1u))
+                  (dispatch-render-shaders
+                    fullscreen-vertex
+                    grid-fragment
+                    3)
+                  (+= frame-index 1))))
 

@@ -19,7 +19,6 @@
 
 (defn rand []: f32
   ; based on https://amindforeverprogramming.blogspot.com/2013/07/random-floats-in-glsl-330.html
-
   (= rand-state
      (+ rand-state 0.025))
   (let [mantissa-mask 8388607u
@@ -198,11 +197,9 @@
 (struct BiquadParameters
   cutoff: f32
   ; in Hz
-
   q: f32
   lp: f32
   ; the three numerator-space mix knobs
-
   bp: f32
   hp: f32)
 
@@ -221,10 +218,8 @@
         a2 (/ (- 1. alpha) a0)
         lp-shape (* 0.5 (- 1. cs))
         ; (1-c)/2: zeros at Nyquist
-
         hp-shape (* 0.5 (+ 1. cs))
         ; (1+c)/2: zeros at DC
-
         b0 (/ (+ (* params.lp lp-shape)
                  (* params.bp alpha)
                  (* params.hp hp-shape))
@@ -275,88 +270,91 @@
         volume-state: vec2f (vec2f 0.)
         secondary-synth-state: [2: f32] (zeroed-array)
         main-synth-state: [2: f32] (zeroed-array)]
-    (start-audio (fn []
-                     (let [dt (/ (sample-rate))
-                           control-t (* (audio-time) 4.)
-                           raw-melody-index (u32 control-t)
-                           melody [(vec2f 0. 0.4)
-                                   (vec2f 0. 0.6)
-                                   (vec2f 0. 0.4)
-                                   (vec2f 2. 0.4)
-                                   (vec2f 2. 0.5)
-                                   (vec2f 1. 0.7)
-                                   (vec2f 1.333 0.5)
-                                   (vec2f 1. 0.6)]
-                           melody-index (% raw-melody-index
-                                           (array-length melody))
-                           phase-index (/ raw-melody-index
-                                          (array-length melody))
-                           distortion-factor (-> (* (/ control-t
-                                                       (f32 (array-length melody)))
-                                                    (/ 16.))
-                                                 (+ -0.25)
-                                                 osc
-                                                 (* 1.5)
-                                                 tanh
-                                                 bi->uni)
-                           song-stage-factor (-> (osc (+ -0.25
-                                                         (* (/ control-t
-                                                               (f32 (array-length melody)))
-                                                            (/ 64))))
-                                                 (sympow 0.25)
-                                                 bi->uni)
-                           fundamental-target (* (if (< (% phase-index 4) 2)
-                                                   80.
-                                                   75.)
-                                                 (pow 1.01
-                                                      (osc (* (/ control-t
-                                                                 (f32 (array-length melody)))
-                                                              (/ 8))))
-                                                 (pow 2. (.x (melody melody-index))))
-                           volume-target (.y (melody melody-index))
-                           fundamental (hooke-attract fundamental-state
-                                                      fundamental-target
-                                                      1000000.
-                                                      0.01
-                                                      dt)
-                           volume (clamp (/ (hooke-attract volume-state
-                                                           volume-target
-                                                           12500000.
-                                                           0.01
-                                                           dt)
-                                            (+ 1.
-                                               (* (* (mix-exp -0.00000000001
-                                                              (mix-exp -0.0000000001
-                                                                       -0.00000000025
-                                                                       song-stage-factor)
-                                                              distortion-factor))
-                                                  (* fundamental-state.y
-                                                     fundamental-state.y))))
-                                         -1.
-                                         1.)]
-                       (corrected-fm-update main-synth-state
-                                            [(vec2f 2. (* fundamental 1.5))
-                                             (vec2f 2.5 (* fundamental 3.))]
-                                            (* (audio-time) fundamental)
-                                            dt)
-                       (corrected-fm-update secondary-synth-state
-                                            [(vec2f 400000. 2.)
-                                             (vec2f 200000. 3.)]
-                                            1.
-                                            dt)
-                       (let [raw-sample (-> (osc (last main-synth-state))
-                                            (mix 1. <> song-stage-factor)
-                                            (sympow (mix-exp 0.9 0.1 distortion-factor))
-                                            (* volume))]
-                         (= filter
-                            (mix filter
-                                 raw-sample
-                                 (mix 0.2
-                                      (mix-exp 0.9
-                                               0.3
-                                               (pow distortion-factor 1.3))
-                                      song-stage-factor))))
-                       filter))))
+    (start-audio
+      (fn []
+        (let [dt (/ (sample-rate))
+              control-t (* (audio-time) 4.)
+              raw-melody-index (u32 control-t)
+              melody [(vec2f 0. 0.4)
+                      (vec2f 0. 0.6)
+                      (vec2f 0. 0.4)
+                      (vec2f 2. 0.4)
+                      (vec2f 2. 0.5)
+                      (vec2f 1. 0.7)
+                      (vec2f 1.333 0.5)
+                      (vec2f 1. 0.6)]
+              melody-index (% raw-melody-index
+                              (array-length melody))
+              phase-index (/ raw-melody-index
+                             (array-length melody))
+              distortion-factor (-> (* (/ control-t
+                                          (f32 (array-length melody)))
+                                       (/ 16.))
+                                    (+ -0.25)
+                                    osc
+                                    (* 1.5)
+                                    tanh
+                                    bi->uni)
+              song-stage-factor (-> (osc (+ -0.25
+                                            (* (/ control-t
+                                                  (f32 (array-length melody)))
+                                               (/ 64))))
+                                    (sympow 0.25)
+                                    bi->uni)
+              fundamental-target (* (if (< (% phase-index 4) 2)
+                                      80.
+                                      75.)
+                                    (pow 1.01
+                                         (osc (* (/ control-t
+                                                    (f32 (array-length melody)))
+                                                 (/ 8))))
+                                    (pow 2. (.x (melody melody-index))))
+              volume-target (.y (melody melody-index))
+              fundamental (hooke-attract fundamental-state
+                                         fundamental-target
+                                         1000000.
+                                         0.01
+                                         dt)
+              volume (clamp (/ (hooke-attract volume-state
+                                              volume-target
+                                              12500000.
+                                              0.01
+                                              dt)
+                               (+ 1.
+                                  (* (* (mix-exp -0.00000000001
+                                                 (mix-exp -0.0000000001
+                                                          -0.00000000025
+                                                          song-stage-factor)
+                                                 distortion-factor))
+                                     (* fundamental-state.y
+                                        fundamental-state.y))))
+                            -1.
+                            1.)]
+          (corrected-fm-update
+            main-synth-state
+            [(vec2f 2. (* fundamental 1.5))
+             (vec2f 2.5 (* fundamental 3.))]
+            (* (audio-time) fundamental)
+            dt)
+          (corrected-fm-update
+            secondary-synth-state
+            [(vec2f 400000. 2.)
+             (vec2f 200000. 3.)]
+            1.
+            dt)
+          (let [raw-sample (-> (osc (last main-synth-state))
+                               (mix 1. <> song-stage-factor)
+                               (sympow (mix-exp 0.9 0.1 distortion-factor))
+                               (* volume))]
+            (= filter
+               (mix filter
+                    raw-sample
+                    (mix 0.2
+                         (mix-exp 0.9
+                                  0.3
+                                  (pow distortion-factor 1.3))
+                         song-stage-factor))))
+          filter))))
   (spawn-window (fn [] ())))
 
 ; LLM-written code, be careful

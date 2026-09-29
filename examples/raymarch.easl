@@ -20,10 +20,6 @@
          0.
          1.))
 
-(enum (Option T)
-  None
-  (Some T))
-
 (struct Ray
   pos: vec3f
   dir: vec3f)
@@ -99,9 +95,9 @@
 @cpu
 (defn main []
   (spawn-window (fn []
-                    (= dimensions
-                       (vec2f (window-resolution)))
-                    (= time (+ time (/ 120.)))
-                    (print time)
-                    (dispatch-render-shaders vertex fragment 3))))
+                  (= dimensions
+                     (vec2f (window-resolution)))
+                  (= time (+ time (/ 120.)))
+                  (print time)
+                  (dispatch-render-shaders vertex fragment 3))))
 

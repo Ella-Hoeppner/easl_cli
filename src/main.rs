@@ -15,6 +15,8 @@ use easl::interpreter::{
   run_program_entry_with_io_from_path,
 };
 use easl::parse::EaslMultiDocument;
+#[cfg(feature = "web")]
+use easl::web_bundle::bundle_program;
 use notify::{
   Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -47,6 +49,12 @@ enum Command {
     /// Watch for file changes and recompile automatically
     #[arg(short, long)]
     watch: bool,
+
+    /// Compile to a web page that runs the program in the browser, through
+    /// WebGPU. Output is a directory, defaulting to the input file's name
+    /// with a `_web` suffix
+    #[arg(long)]
+    web: bool,
   },
   /// Typecheck a .easl file without comiling
   Check {
@@ -163,7 +171,11 @@ fn find_easl_files(dir: &PathBuf) -> Result<Vec<PathBuf>, String> {
 fn compile_single_file(
   input: PathBuf,
   output: Option<PathBuf>,
+  web: bool,
 ) -> Result<(), String> {
+  if web {
+    return compile_web(&input, output);
+  }
   println!("Compiling {}...", input.display());
   match try_compile_easl_file(&input) {
     Ok(wgsl) => {
@@ -236,10 +248,17 @@ fn compile_file(
   input: PathBuf,
   output: Option<PathBuf>,
   watch: bool,
+  web: bool,
 ) -> Result<(), String> {
+  if web && input.is_dir() {
+    return Err(
+      "Error: --web compiles a single program; pass its main .easl file"
+        .to_string(),
+    );
+  }
   if watch {
     // Initial compilation
-    compile_once(&input, &output)?;
+    compile_once(&input, &output, web)?;
 
     // Build initial content cache
     let mut file_contents: HashMap<PathBuf, String> = HashMap::new();
@@ -301,16 +320,21 @@ fn compile_file(
               }
 
               println!("\n{} changed, recompiling...", path.display());
-              let output_path =
+              let output_path = if web {
+                output.clone()
+              } else {
                 match get_output_path_for_file(&path, &input, &output) {
                   Ok(p) => Some(p),
                   Err(e) => {
                     eprintln!("{}", e);
                     continue;
                   }
-                };
+                }
+              };
 
-              if let Err(e) = compile_single_file(path.clone(), output_path) {
+              if let Err(e) =
+                compile_single_file(path.clone(), output_path, web)
+              {
                 eprintln!("{}", e);
               }
 
@@ -327,13 +351,14 @@ fn compile_file(
       }
     }
   } else {
-    compile_once(&input, &output)
+    compile_once(&input, &output, web)
   }
 }
 
 fn compile_once(
   input: &PathBuf,
   output: &Option<PathBuf>,
+  web: bool,
 ) -> Result<(), String> {
   if input.is_dir() {
     // Compile all .easl files in the directory recursively
@@ -363,7 +388,7 @@ fn compile_once(
         }
       };
 
-      if let Err(e) = compile_single_file(file.clone(), output_path) {
+      if let Err(e) = compile_single_file(file.clone(), output_path, web) {
         eprintln!("{}", e);
         failed.push(file);
       }
@@ -381,8 +406,54 @@ fn compile_once(
     } else {
       None
     };
-    compile_single_file(input.clone(), output_path)
+    compile_single_file(input.clone(), output_path, web)
   }
+}
+
+/// Compiles the program in `input` to a web page in the `output` directory:
+/// the page, the program's sources, and the prebuilt web runtime that
+/// compiles and runs them in the browser.
+#[cfg(feature = "web")]
+fn compile_web(input: &Path, output: Option<PathBuf>) -> Result<(), String> {
+  const RUNTIME_JS: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/easl_web.js"));
+  const RUNTIME_WASM: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_bg.wasm"));
+  println!("Compiling {} for the web...", input.display());
+  let bundle = bundle_program(input)
+    .map_err(|e| format!("Compilation failed due to errors:\n\n{e}"))?;
+  let output_dir = output.unwrap_or_else(|| {
+    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
+    input.with_file_name(format!("{stem}_web"))
+  });
+  fs::create_dir_all(&output_dir).map_err(|e| {
+    format!(
+      "Error: Failed to create directory {}\n{e}",
+      output_dir.display()
+    )
+  })?;
+  for (name, contents) in [
+    ("index.html", bundle.index_html.as_bytes()),
+    ("easl-program.js", bundle.program_js.as_bytes()),
+    ("easl_web.js", RUNTIME_JS),
+    ("easl_web_bg.wasm", RUNTIME_WASM),
+  ] {
+    let path = output_dir.join(name);
+    fs::write(&path, contents).map_err(|e| {
+      format!("Error: Failed to write output file {}\n{e}", path.display())
+    })?;
+  }
+  println!("Finished: {}", output_dir.display());
+  Ok(())
+}
+
+#[cfg(not(feature = "web"))]
+fn compile_web(_input: &Path, _output: Option<PathBuf>) -> Result<(), String> {
+  Err(
+    "This build of the easl CLI was compiled without web support. Build the \
+     CLI with `--features web` to enable `easl compile --web`."
+      .to_string(),
+  )
 }
 
 fn check_single_file(input: PathBuf) -> Result<(), String> {
@@ -668,7 +739,8 @@ fn main() {
       input,
       output,
       watch,
-    } => compile_file(input, output, watch),
+      web,
+    } => compile_file(input, output, watch, web),
     Command::Check { input } => check_file(input),
     Command::Format { input, output } => format_file(input, output),
     Command::Run {

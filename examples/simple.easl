@@ -31,8 +31,8 @@
 @cpu
 (defn main []
   (spawn-window (fn []
-                    (= dimensions
-                       (vec2f (window-resolution)))
-                    (+= time 0.01)
-                    (dispatch-render-shaders vertex fragment 3))))
+                  (= dimensions
+                     (vec2f (window-resolution)))
+                  (+= time 0.01)
+                  (dispatch-render-shaders vertex fragment 3))))
 
