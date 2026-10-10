@@ -18,7 +18,7 @@ After running this, you can test that the installation was successful by running
 - `easl compile <INPUT>` - Compile a single file or directory
 - `--output, -o <OUTPUT>` - Specify output file or directory (defaults to input with .wgsl extension)
 - `--watch, -w` - Watch for file changes and automatically recompile
-- `--web` - Compile a program to a web page that runs it in the browser through WebGPU. The output is a directory (defaulting to the input's name with a `_web` suffix) holding `index.html`, which shows the program on a full-window canvas, and `easl-program.js`, which exports `startEaslProgram(canvas)` for use in other pages. Serve the directory over HTTP to view it. Audio, MIDI, and file-loading builtins aren't supported on the web yet
+- `--web` - Compile a program to a web page that runs it in the browser through WebGPU. The output is a directory (defaulting to the input's name with a `_web` suffix) holding `index.html`, which shows the program on a full-window canvas, and `easl-program.js`, which exports `startEaslProgram(canvas)` for use in other pages. Serve the directory over HTTP to view it. A program with atomics shared between its main and audio threads needs the page to be cross-origin isolated: serve it with the headers `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Audio, MIDI, and file-loading builtins aren't supported on the web yet
 
 **check** - Typecheck .easl files without compiling
 - `easl check <INPUT>` - Check a single file or directory

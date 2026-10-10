@@ -16,7 +16,7 @@ use easl::interpreter::{
 };
 use easl::parse::EaslMultiDocument;
 #[cfg(feature = "web")]
-use easl::web_bundle::bundle_program;
+use easl::web_bundle::{RUNTIME_SUPPORT_FILES, bundle_program};
 use notify::{
   Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -432,12 +432,19 @@ fn compile_web(input: &Path, output: Option<PathBuf>) -> Result<(), String> {
       output_dir.display()
     )
   })?;
-  for (name, contents) in [
+  let files = [
     ("index.html", bundle.index_html.as_bytes()),
     ("easl-program.js", bundle.program_js.as_bytes()),
     ("easl_web.js", RUNTIME_JS),
     ("easl_web_bg.wasm", RUNTIME_WASM),
-  ] {
+  ]
+  .into_iter()
+  .chain(
+    RUNTIME_SUPPORT_FILES
+      .iter()
+      .map(|(name, contents)| (*name, contents.as_bytes())),
+  );
+  for (name, contents) in files {
     let path = output_dir.join(name);
     fs::write(&path, contents).map_err(|e| {
       format!("Error: Failed to write output file {}\n{e}", path.display())
