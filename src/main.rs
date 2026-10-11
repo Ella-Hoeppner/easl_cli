@@ -23,9 +23,9 @@ use notify::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 #[command(name = "easl")]
@@ -127,21 +127,197 @@ fn try_compile_easl_file(input: &Path) -> Result<String, String> {
 
 #[cfg(feature = "interpreter")]
 fn try_get_validated_easl_program(input: &Path) -> Result<Program, String> {
-  match load_easl_program_from_file(input)
-    .map_err(|e| format!("IO error reading {}: {}", input.display(), e))?
-  {
-    Ok((documents, Ok(mut program))) => {
+  load_validated_easl_program(input).1
+}
+
+/// The files a program was loaded from: its main file and everything that
+/// file imports (even when loading stopped at an error), each with the
+/// source that was read.
+fn document_sources(documents: &EaslMultiDocument) -> Vec<(PathBuf, String)> {
+  documents
+    .sources
+    .iter()
+    .map(|(_, path, source)| (PathBuf::from(path), source.clone()))
+    .collect()
+}
+
+/// The files the program in `input` is made of, as [`document_sources`]
+/// (empty if `input` can't be read).
+fn program_sources(input: &Path) -> Vec<(PathBuf, String)> {
+  match load_easl_program_from_file(input) {
+    Ok(Ok((documents, _))) | Ok(Err(documents)) => document_sources(&documents),
+    Err(_) => vec![],
+  }
+}
+
+/// Loads and validates the program in `input`, also returning its
+/// [`document_sources`].
+#[cfg(feature = "interpreter")]
+fn load_validated_easl_program(
+  input: &Path,
+) -> (Vec<(PathBuf, String)>, Result<Program, String>) {
+  match load_easl_program_from_file(input) {
+    Err(e) => (
+      vec![],
+      Err(format!("IO error reading {}: {}", input.display(), e)),
+    ),
+    Ok(Ok((documents, Ok(mut program)))) => {
       let errors = program.validate_raw_program(CompilerTarget::WGSL);
-      if !errors.is_empty() {
-        return Err(errors.describe(&documents));
-      }
-      Ok(program)
+      let result = if errors.is_empty() {
+        Ok(program)
+      } else {
+        Err(errors.describe(&documents))
+      };
+      (document_sources(&documents), result)
     }
-    Ok((documents, Err(errors))) => Err(errors.describe(&documents)),
-    Err(failed_documents) => Err(format!(
-      "Compilation failed due to parsing error:\n\n{}",
-      describe_parse_failures(&failed_documents)
-    )),
+    Ok(Ok((documents, Err(errors)))) => (
+      document_sources(&documents),
+      Err(errors.describe(&documents)),
+    ),
+    Ok(Err(failed_documents)) => (
+      document_sources(&failed_documents),
+      Err(format!(
+        "Compilation failed due to parsing error:\n\n{}",
+        describe_parse_failures(&failed_documents)
+      )),
+    ),
+  }
+}
+
+/// The files programs were compiled from, watched for changes: a change to
+/// any of them (a main file or anything it imports) calls `on_change` with
+/// the changed file. A watched directory also reports `.easl` files in it
+/// that aren't watched yet (new programs).
+struct WatchedSources {
+  watcher: RecommendedWatcher,
+  /// Each watched file with the contents last seen: what the programs were
+  /// compiled from, or a newer version already reported.
+  contents: Arc<Mutex<HashMap<PathBuf, String>>>,
+  on_change: Arc<dyn Fn(&Path) + Send + Sync>,
+}
+
+/// What a file event means for the watched files.
+enum FileState {
+  Unwatched,
+  Unchanged,
+  Changed,
+}
+
+impl WatchedSources {
+  fn new(
+    directory: Option<&Path>,
+    on_change: impl Fn(&Path) + Send + Sync + 'static,
+  ) -> Result<Self, String> {
+    let contents = Arc::new(Mutex::new(HashMap::<PathBuf, String>::new()));
+    let on_change: Arc<dyn Fn(&Path) + Send + Sync> = Arc::new(on_change);
+    let (notify_tx, notify_rx) = channel();
+    let mut watcher = RecommendedWatcher::new(notify_tx, Config::default())
+      .map_err(|e| format!("Error: Failed to create file watcher\n{}", e))?;
+    let directory = match directory {
+      Some(directory) => {
+        let directory = directory.canonicalize().map_err(|e| {
+          format!("Error: Failed to watch path {}\n{}", directory.display(), e)
+        })?;
+        watcher
+          .watch(&directory, RecursiveMode::Recursive)
+          .map_err(|e| {
+            format!(
+              "Error: Failed to watch path {}\n{}",
+              directory.display(),
+              e
+            )
+          })?;
+        Some(directory)
+      }
+      None => None,
+    };
+    {
+      let contents = Arc::clone(&contents);
+      let on_change = Arc::clone(&on_change);
+      std::thread::spawn(move || {
+        while let Ok(event) = notify_rx.recv() {
+          // Editors save in place (modify events) or by renaming a new
+          // file over the old one (create or rename events).
+          let Ok(Event {
+            kind: EventKind::Modify(_) | EventKind::Create(_),
+            paths,
+            ..
+          }) = event
+          else {
+            continue;
+          };
+          for path in paths {
+            let Ok(path) = path.canonicalize() else {
+              continue;
+            };
+            match Self::check(&contents, &path) {
+              FileState::Changed => on_change(&path),
+              FileState::Unwatched
+                if directory
+                  .as_ref()
+                  .is_some_and(|directory| path.starts_with(directory))
+                  && path.extension().and_then(|e| e.to_str())
+                    == Some("easl") =>
+              {
+                on_change(&path)
+              }
+              FileState::Unwatched | FileState::Unchanged => {}
+            }
+          }
+        }
+      });
+    }
+    Ok(Self {
+      watcher,
+      contents,
+      on_change,
+    })
+  }
+
+  /// Whether watched file `path` differs from its contents last seen,
+  /// recording the current contents if so.
+  fn check(
+    contents: &Mutex<HashMap<PathBuf, String>>,
+    path: &Path,
+  ) -> FileState {
+    let mut contents = contents.lock().unwrap();
+    let Some(last) = contents.get_mut(path) else {
+      return FileState::Unwatched;
+    };
+    match fs::read_to_string(path) {
+      Ok(current) if current != *last => {
+        *last = current;
+        FileState::Changed
+      }
+      _ => FileState::Unchanged,
+    }
+  }
+
+  /// Watches exactly `sources`, the files the programs were just compiled
+  /// from (with the contents they were compiled from); calls `on_change`
+  /// for each that has already changed since it was read.
+  fn watch(&mut self, sources: Vec<(PathBuf, String)>) {
+    let mut contents = self.contents.lock().unwrap();
+    for path in contents.keys() {
+      if !sources.iter().any(|(source, _)| source == path) {
+        let _ = self.watcher.unwatch(path);
+      }
+    }
+    for (path, _) in &sources {
+      if !contents.contains_key(path)
+        && let Err(e) = self.watcher.watch(path, RecursiveMode::NonRecursive)
+      {
+        eprintln!("Warning: can't watch {}: {}", path.display(), e);
+      }
+    }
+    *contents = sources.into_iter().collect();
+    let paths: Vec<PathBuf> = contents.keys().cloned().collect();
+    drop(contents);
+    for path in paths {
+      if let FileState::Changed = Self::check(&self.contents, &path) {
+        (self.on_change)(&path);
+      }
+    }
   }
 }
 
@@ -257,101 +433,115 @@ fn compile_file(
     );
   }
   if watch {
-    // Initial compilation
-    compile_once(&input, &output, web)?;
-
-    // Build initial content cache
-    let mut file_contents: HashMap<PathBuf, String> = HashMap::new();
-    let files_to_watch = if input.is_dir() {
-      find_easl_files(&input)?
-    } else {
-      vec![input.clone()]
-    };
-
-    for file in &files_to_watch {
-      if let Ok(content) = fs::read_to_string(file) {
-        file_contents.insert(file.clone(), content);
-      }
-    }
-
-    // Set up file watcher
-    println!("\nWatching for changes... (Press Ctrl+C to stop)");
-
-    let (tx, rx) = channel();
-    let mut watcher = RecommendedWatcher::new(tx, Config::default())
-      .map_err(|e| format!("Error: Failed to create file watcher\n{}", e))?;
-
-    // Watch the input path
-    let watch_mode = if input.is_dir() {
-      RecursiveMode::Recursive
-    } else {
-      RecursiveMode::NonRecursive
-    };
-
-    watcher.watch(&input, watch_mode).map_err(|e| {
-      format!("Error: Failed to watch path {}\n{}", input.display(), e)
-    })?;
-
-    // Process file change events
-    loop {
-      match rx.recv() {
-        Ok(Ok(Event {
-          kind: EventKind::Modify(_),
-          paths,
-          ..
-        })) => {
-          for path in paths {
-            if path.extension().and_then(|s| s.to_str()) == Some("easl") {
-              // Read current file content
-              let current_content = match fs::read_to_string(&path) {
-                Ok(content) => content,
-                Err(e) => {
-                  eprintln!("Error reading {}: {}", path.display(), e);
-                  continue;
-                }
-              };
-
-              // Check if content has actually changed
-              if let Some(cached_content) = file_contents.get(&path) {
-                if cached_content == &current_content {
-                  // Content unchanged, skip recompilation
-                  continue;
-                }
-              }
-
-              println!("\n{} changed, recompiling...", path.display());
-              let output_path = if web {
-                output.clone()
-              } else {
-                match get_output_path_for_file(&path, &input, &output) {
-                  Ok(p) => Some(p),
-                  Err(e) => {
-                    eprintln!("{}", e);
-                    continue;
-                  }
-                }
-              };
-
-              if let Err(e) =
-                compile_single_file(path.clone(), output_path, web)
-              {
-                eprintln!("{}", e);
-              }
-
-              // Update cached content after compilation attempt (success or failure)
-              file_contents.insert(path.clone(), current_content);
-            }
-          }
-        }
-        Ok(Ok(_)) => {} // Ignore other event types
-        Ok(Err(e)) => eprintln!("Watch error: {}", e),
-        Err(e) => {
-          return Err(format!("Error: Channel receive error\n{}", e));
-        }
-      }
-    }
+    watch_compile(input, output, web)
   } else {
     compile_once(&input, &output, web)
+  }
+}
+
+/// `compile --watch`: compiles `input` (a program, or every program in a
+/// directory), then recompiles each program whenever one of its files
+/// (its main file or anything it imports) changes. In a directory, a new
+/// `.easl` file is compiled as a new program.
+fn watch_compile(
+  input: PathBuf,
+  output: Option<PathBuf>,
+  web: bool,
+) -> Result<(), String> {
+  let directory = input.is_dir();
+  // Programs are identified by canonical paths, like the files the watcher
+  // reports, so a reported file can be matched to the programs it's part of.
+  let input = input
+    .canonicalize()
+    .map_err(|e| format!("Error: Failed to read {}\n{}", input.display(), e))?;
+  let program_files = if directory {
+    find_easl_files(&input)?
+  } else {
+    vec![input.clone()]
+  };
+  let (change_tx, change_rx) = channel::<PathBuf>();
+  let mut watched =
+    WatchedSources::new(directory.then_some(input.as_path()), move |path| {
+      change_tx.send(path.to_path_buf()).ok();
+    })?;
+  // Each program's main file, with the files it was last compiled from.
+  let mut programs: Vec<(PathBuf, Vec<(PathBuf, String)>)> = vec![];
+  let compile = |program: &Path| -> Vec<(PathBuf, String)> {
+    // The sources are read before compiling: a file that changes in
+    // between is newer than what's recorded, so it's compiled again.
+    let sources = program_sources(program);
+    let output_path = if directory {
+      match get_output_path_for_file(program, &input, &output) {
+        Ok(path) => Some(path),
+        Err(e) => {
+          eprintln!("{e}");
+          return sources;
+        }
+      }
+    } else {
+      output.clone()
+    };
+    if let Err(e) = compile_single_file(program.to_path_buf(), output_path, web)
+    {
+      eprintln!("{e}");
+    }
+    sources
+  };
+  for file in program_files {
+    let file = file.canonicalize().unwrap_or(file);
+    let sources = compile(&file);
+    programs.push((file, sources));
+  }
+  let all_sources = |programs: &[(PathBuf, Vec<(PathBuf, String)>)]| {
+    programs
+      .iter()
+      .flat_map(|(_, sources)| sources.iter().cloned())
+      .collect()
+  };
+  watched.watch(all_sources(&programs));
+  println!("\nWatching for changes... (Press Ctrl+C to stop)");
+  loop {
+    let first = change_rx
+      .recv()
+      .map_err(|e| format!("Error: Channel receive error\n{e}"))?;
+    let mut changed = vec![first];
+    changed.extend(change_rx.try_iter());
+    changed.sort();
+    changed.dedup();
+    for path in &changed {
+      // A new file in the watched directory is a new program.
+      if directory
+        && !programs.iter().any(|(program, sources)| {
+          program == path || sources.iter().any(|(source, _)| source == path)
+        })
+      {
+        programs.push((path.clone(), vec![]));
+      }
+    }
+    for (program, sources) in programs.iter_mut() {
+      // A program is stale if it's new or one of its files no longer
+      // matches what it was compiled from (a late event can report a
+      // change the program was already compiled with).
+      let stale = |path: &PathBuf| {
+        if sources.is_empty() {
+          return path == program;
+        }
+        sources.iter().any(|(source, compiled)| {
+          source == path
+            && fs::read_to_string(path)
+              .is_ok_and(|current| current != *compiled)
+        })
+      };
+      let Some(path) = changed.iter().find(|path| stale(path)) else {
+        continue;
+      };
+      println!("\n{} changed, recompiling...", path.display());
+      let new_sources = compile(program);
+      if !new_sources.is_empty() {
+        *sources = new_sources;
+      }
+    }
+    watched.watch(all_sources(&programs));
   }
 }
 
@@ -617,51 +807,34 @@ fn run_file(
     // we need to block-wait for the next file change.
     let (change_tx, change_rx) = channel::<()>();
 
-    // File watcher runs in a background thread.  On any real content change
-    // it sets the reload flag (signals the running window loop to exit) and
-    // sends on change_tx (wakes a blocking wait in the main loop).
-    let (notify_tx, notify_rx) = channel();
-    let mut watcher = RecommendedWatcher::new(notify_tx, Config::default())
-      .map_err(|e| format!("Error: Failed to create file watcher\n{}", e))?;
-    watcher
-      .watch(&input, RecursiveMode::NonRecursive)
-      .map_err(|e| {
-        format!("Error: Failed to watch path {}\n{}", input.display(), e)
-      })?;
-
-    {
+    // On any real change to the program's files, the watcher sets the
+    // reload flag (signals the running window loop to exit) and sends on
+    // change_tx (wakes a blocking wait in the main loop).
+    let mut watched = {
       let reload_flag = Arc::clone(&reload_flag);
-      let input = input.clone();
-      std::thread::spawn(move || {
-        let mut last = fs::read_to_string(&input).unwrap_or_default();
-        loop {
-          match notify_rx.recv() {
-            Ok(Ok(Event {
-              kind: EventKind::Modify(_),
-              ..
-            })) => {
-              if let Ok(content) = fs::read_to_string(&input) {
-                if content != last {
-                  last = content;
-                  reload_flag.store(true, Ordering::Relaxed);
-                  change_tx.send(()).ok();
-                }
-              }
-            }
-            Ok(Ok(_)) | Ok(Err(_)) => {}
-            Err(_) => break,
-          }
-        }
-      });
-    }
+      WatchedSources::new(None, move |_| {
+        reload_flag.store(true, Ordering::Relaxed);
+        change_tx.send(()).ok();
+      })?
+    };
 
     let mut io = StdoutIO::with_reload_flag(Arc::clone(&reload_flag));
 
     println!("Watching for changes... (Press Ctrl+C to stop)");
 
     loop {
-      // Compile current source (re-reads file and chases imports each time).
-      let program = match try_get_validated_easl_program(&input) {
+      // Reset IO state (clears GPU handle and reload flag) before reading
+      // the file, so a change saved while this version compiles still
+      // reloads it.
+      io.reset_for_reload();
+
+      // Compile current source (re-reads file and chases imports each time),
+      // and watch the files it was compiled from.
+      let (sources, program) = load_validated_easl_program(&input);
+      if !sources.is_empty() {
+        watched.watch(sources);
+      }
+      let program = match program {
         Ok(p) => p,
         Err(e) => {
           eprintln!("Compilation error:\n{e}");
@@ -685,9 +858,6 @@ fn run_file(
       {
         easl::audio::stop_audio();
       }
-
-      // Reset IO state (clears GPU handle and reload flag) before each run.
-      io.reset_for_reload();
 
       // Run the program.  The same `io` is reused across reloads so the
       // reload_flag Arc is still wired up.
