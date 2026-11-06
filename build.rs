@@ -1,7 +1,9 @@
-//! With the `web` feature, builds easl's web runtime (the `web/` crate in
-//! the easl repository) to WebAssembly and generates its JS bindings, so
-//! `easl compile --web` can embed them. Programs compile in the browser, so
-//! this runtime is built once, with the CLI.
+//! With the `web` feature, builds easl's web runtimes (the `web/` crate in
+//! the easl repository) to WebAssembly and generates their JS bindings, so
+//! `easl compile --web` can embed them: the one that runs precompiled
+//! programs, and the one built with the compiler, which compiles programs
+//! from their sources in the browser (`--with-compiler`). They're the same
+//! for every program, so they're built once, with the CLI.
 
 fn main() {
   #[cfg(feature = "web")]
@@ -48,47 +50,54 @@ mod web {
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target_dir = out_dir.join("web-target");
-    // The runtime is its own build, configured by `web/.cargo/config.toml`
-    // (target and linker flags) — none of this build's settings apply.
-    // Cargo describes this build script's target in environment variables
-    // (`CARGO_CFG_UNIX`, `TARGET`, ...), which the nested build would
-    // otherwise pass on to its own build scripts.
-    let mut cargo = Command::new(env::var("CARGO").unwrap());
-    cargo
-      .current_dir(&web_dir)
-      .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
-      .arg("--target-dir")
-      .arg(&target_dir);
-    for (name, _) in env::vars_os() {
-      let name = name.to_string_lossy();
-      if (name.starts_with("CARGO_") && name != "CARGO_HOME")
-        || BUILD_SCRIPT_VARS.contains(&&*name)
-      {
-        cargo.env_remove(&*name);
+    for (profile, features, out_name) in [
+      ("release", "", "easl_web"),
+      ("release-compiler", "compiler", "easl_web_compiler"),
+    ] {
+      // The runtime is its own build, configured by
+      // `web/.cargo/config.toml` (target and linker flags) — none of this
+      // build's settings apply. Cargo describes this build script's target
+      // in environment variables (`CARGO_CFG_UNIX`, `TARGET`, ...), which
+      // the nested build would otherwise pass on to its own build scripts.
+      let mut cargo = Command::new(env::var("CARGO").unwrap());
+      cargo
+        .current_dir(&web_dir)
+        .args(["build", "--profile", profile, "--features", features])
+        .args(["--target", "wasm32-unknown-unknown", "--target-dir"])
+        .arg(&target_dir);
+      for (name, _) in env::vars_os() {
+        let name = name.to_string_lossy();
+        if (name.starts_with("CARGO_") && name != "CARGO_HOME")
+          || BUILD_SCRIPT_VARS.contains(&&*name)
+        {
+          cargo.env_remove(&*name);
+        }
       }
-    }
-    let status = cargo
-      .status()
-      .expect("failed to run cargo to build the easl web runtime");
-    if !status.success() {
-      panic!(
-        "building the easl web runtime failed. It needs the wasm32 target \
-         (`rustup target add wasm32-unknown-unknown`); to build the CLI \
-         without `easl compile --web`, disable the `web` feature \
-         (`--no-default-features --features interpreter`)."
-      );
-    }
+      let status = cargo
+        .status()
+        .expect("failed to run cargo to build the easl web runtime");
+      if !status.success() {
+        panic!(
+          "building the easl web runtime failed. It needs the wasm32 target \
+           (`rustup target add wasm32-unknown-unknown`); to build the CLI \
+           without `easl compile --web`, disable the `web` feature \
+           (`--no-default-features --features interpreter`)."
+        );
+      }
 
-    Bindgen::new()
-      .input_path(
-        target_dir.join("wasm32-unknown-unknown/release/easl_web.wasm"),
-      )
-      .web(true)
-      .unwrap()
-      .typescript(false)
-      .omit_default_module_path(false)
-      .generate(&out_dir)
-      .expect("failed to generate the easl web runtime's JS bindings");
+      Bindgen::new()
+        .input_path(
+          target_dir
+            .join(format!("wasm32-unknown-unknown/{profile}/easl_web.wasm")),
+        )
+        .out_name(out_name)
+        .web(true)
+        .unwrap()
+        .typescript(false)
+        .omit_default_module_path(false)
+        .generate(&out_dir)
+        .expect("failed to generate the easl web runtime's JS bindings");
+    }
   }
 
   /// The easl crate's source directory, wherever cargo resolved it (a path

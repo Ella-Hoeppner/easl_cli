@@ -16,7 +16,10 @@ use easl::interpreter::{
 };
 use easl::parse::EaslMultiDocument;
 #[cfg(feature = "web")]
-use easl::web_bundle::{RUNTIME_SUPPORT_FILES, bundle_program};
+use easl::web_bundle::{
+  COMPILER_RUNTIME_FILES, PROGRAM_DATA_FILE, PROGRAM_JS_FILE, RUNTIME_FILES,
+  RUNTIME_SUPPORT_FILES, bundle_program, bundle_program_sources,
+};
 use notify::{
   Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -55,6 +58,13 @@ enum Command {
     /// with a `_web` suffix
     #[arg(long)]
     web: bool,
+
+    /// With `--web`, package the program's sources and a runtime that
+    /// compiles them in the browser (much larger), for pages that change the
+    /// program as it runs. Its runtime errors say where in the sources they
+    /// happened
+    #[arg(long, requires = "web")]
+    with_compiler: bool,
   },
   /// Typecheck a .easl file without comiling
   Check {
@@ -344,13 +354,21 @@ fn find_easl_files(dir: &PathBuf) -> Result<Vec<PathBuf>, String> {
   Ok(easl_files)
 }
 
+/// What a web build ships: the program precompiled, or its sources and a
+/// runtime that compiles them (`--with-compiler`).
+#[derive(Clone, Copy)]
+enum WebBuild {
+  Precompiled,
+  FromSources,
+}
+
 fn compile_single_file(
   input: PathBuf,
   output: Option<PathBuf>,
-  web: bool,
+  web: Option<WebBuild>,
 ) -> Result<(), String> {
-  if web {
-    return compile_web(&input, output);
+  if let Some(build) = web {
+    return compile_web(&input, output, build);
   }
   println!("Compiling {}...", input.display());
   match try_compile_easl_file(&input) {
@@ -424,9 +442,9 @@ fn compile_file(
   input: PathBuf,
   output: Option<PathBuf>,
   watch: bool,
-  web: bool,
+  web: Option<WebBuild>,
 ) -> Result<(), String> {
-  if web && input.is_dir() {
+  if web.is_some() && input.is_dir() {
     return Err(
       "Error: --web compiles a single program; pass its main .easl file"
         .to_string(),
@@ -446,7 +464,7 @@ fn compile_file(
 fn watch_compile(
   input: PathBuf,
   output: Option<PathBuf>,
-  web: bool,
+  web: Option<WebBuild>,
 ) -> Result<(), String> {
   let directory = input.is_dir();
   // Programs are identified by canonical paths, like the files the watcher
@@ -548,7 +566,7 @@ fn watch_compile(
 fn compile_once(
   input: &PathBuf,
   output: &Option<PathBuf>,
-  web: bool,
+  web: Option<WebBuild>,
 ) -> Result<(), String> {
   if input.is_dir() {
     // Compile all .easl files in the directory recursively
@@ -601,17 +619,62 @@ fn compile_once(
 }
 
 /// Compiles the program in `input` to a web page in the `output` directory:
-/// the page, the program's sources, and the prebuilt web runtime that
-/// compiles and runs them in the browser.
+/// the page, the program (precompiled, or its sources with
+/// `--with-compiler`), and the prebuilt web runtime that runs it in the
+/// browser.
 #[cfg(feature = "web")]
-fn compile_web(input: &Path, output: Option<PathBuf>) -> Result<(), String> {
-  const RUNTIME_JS: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/easl_web.js"));
-  const RUNTIME_WASM: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_bg.wasm"));
+fn compile_web(
+  input: &Path,
+  output: Option<PathBuf>,
+  build: WebBuild,
+) -> Result<(), String> {
+  /// The runtime that runs precompiled programs, and the one that compiles
+  /// programs from their sources, as `build.rs` built them.
+  const RUNTIMES: [(&str, &[u8]); 4] = [
+    (
+      RUNTIME_FILES[0],
+      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web.js")),
+    ),
+    (
+      RUNTIME_FILES[1],
+      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_bg.wasm")),
+    ),
+    (
+      COMPILER_RUNTIME_FILES[0],
+      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_compiler.js")),
+    ),
+    (
+      COMPILER_RUNTIME_FILES[1],
+      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_compiler_bg.wasm")),
+    ),
+  ];
   println!("Compiling {} for the web...", input.display());
-  let bundle = bundle_program(input)
-    .map_err(|e| format!("Compilation failed due to errors:\n\n{e}"))?;
+  let failed = |e| format!("Compilation failed due to errors:\n\n{e}");
+  let (index_html, program_files, runtime_files): (_, Vec<(&str, Vec<u8>)>, _) =
+    match build {
+      WebBuild::Precompiled => {
+        let bundle = bundle_program(input).map_err(failed)?;
+        (
+          bundle.index_html,
+          vec![
+            (
+              PROGRAM_JS_FILE,
+              bundle.program_js(PROGRAM_DATA_FILE).into_bytes(),
+            ),
+            (PROGRAM_DATA_FILE, bundle.program_data),
+          ],
+          &RUNTIMES[..2],
+        )
+      }
+      WebBuild::FromSources => {
+        let bundle = bundle_program_sources(input).map_err(failed)?;
+        (
+          bundle.index_html,
+          vec![(PROGRAM_JS_FILE, bundle.program_js.into_bytes())],
+          &RUNTIMES[..],
+        )
+      }
+    };
   let output_dir = output.unwrap_or_else(|| {
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     input.with_file_name(format!("{stem}_web"))
@@ -622,18 +685,19 @@ fn compile_web(input: &Path, output: Option<PathBuf>) -> Result<(), String> {
       output_dir.display()
     )
   })?;
-  let files = [
-    ("index.html", bundle.index_html.as_bytes()),
-    ("easl-program.js", bundle.program_js.as_bytes()),
-    ("easl_web.js", RUNTIME_JS),
-    ("easl_web_bg.wasm", RUNTIME_WASM),
-  ]
-  .into_iter()
-  .chain(
-    RUNTIME_SUPPORT_FILES
-      .iter()
-      .map(|(name, contents)| (*name, contents.as_bytes())),
-  );
+  let files = [("index.html", index_html.as_bytes())]
+    .into_iter()
+    .chain(
+      program_files
+        .iter()
+        .map(|(name, contents)| (*name, contents.as_slice())),
+    )
+    .chain(runtime_files.iter().copied())
+    .chain(
+      RUNTIME_SUPPORT_FILES
+        .iter()
+        .map(|(name, contents)| (*name, contents.as_bytes())),
+    );
   for (name, contents) in files {
     let path = output_dir.join(name);
     fs::write(&path, contents).map_err(|e| {
@@ -645,7 +709,11 @@ fn compile_web(input: &Path, output: Option<PathBuf>) -> Result<(), String> {
 }
 
 #[cfg(not(feature = "web"))]
-fn compile_web(_input: &Path, _output: Option<PathBuf>) -> Result<(), String> {
+fn compile_web(
+  _input: &Path,
+  _output: Option<PathBuf>,
+  _build: WebBuild,
+) -> Result<(), String> {
   Err(
     "This build of the easl CLI was compiled without web support. Build the \
      CLI with `--features web` to enable `easl compile --web`."
@@ -868,7 +936,7 @@ fn run_file(
         &input,
       ) {
         Err(e) => {
-          eprintln!("Runtime error: {e:?}");
+          eprintln!("Runtime error: {e}");
           close_persistent_window();
           // Rebuild io since it was consumed.
           io = StdoutIO::with_reload_flag(Arc::clone(&reload_flag));
@@ -899,7 +967,7 @@ fn run_file(
       entry.as_ref().map(|s| s.as_str()),
       &input,
     ) {
-      Err(e) => return Err(format!("{e:?}")),
+      Err(e) => return Err(format!("Runtime error: {e}")),
       _ => {}
     }
     Ok(())
@@ -917,7 +985,17 @@ fn main() {
       output,
       watch,
       web,
-    } => compile_file(input, output, watch, web),
+      with_compiler,
+    } => compile_file(
+      input,
+      output,
+      watch,
+      web.then_some(if with_compiler {
+        WebBuild::FromSources
+      } else {
+        WebBuild::Precompiled
+      }),
+    ),
     Command::Check { input } => check_file(input),
     Command::Format { input, output } => format_file(input, output),
     Command::Run {
