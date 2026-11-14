@@ -701,7 +701,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 [[package]]
 name = "easl"
 version = "0.0.0"
-source = "git+https://github.com/Ella-Hoeppner/easl#40cafb02caf39f7874c1f60dc07d73ace2e62641"
+source = "git+https://github.com/Ella-Hoeppner/easl#3e76cdc08fd5610b5a184f520d91f9872c987c34"
 dependencies = [
  "arc-swap",
  "cpal",
@@ -718,6 +718,7 @@ dependencies = [
  "take_mut",
  "thiserror 2.0.21",
  "unicode-segmentation",
+ "wasm-bindgen-cli-support",
  "wgpu",
  "winit",
 ]
@@ -729,8 +730,6 @@ dependencies = [
  "clap",
  "easl",
  "notify",
- "serde_json",
- "wasm-bindgen-cli-support",
 ]
 
 [[package]]
@@ -863,11 +862,11 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "fsexp"
-version = "0.0.0"
-source = "git+https://github.com/Ella-Hoeppner/fsexp.git#d804019adbed52df6cced4738fb6704c5b19937f"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9d9b84b7d803b6890cc279bbb99d0105df220919c835f970367f22cff085d53"
 dependencies = [
  "take_mut",
- "unicode-segmentation",
 ]
 
 [[package]]

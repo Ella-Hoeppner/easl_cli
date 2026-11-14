@@ -17,8 +17,8 @@ use easl::interpreter::{
 use easl::parse::EaslMultiDocument;
 #[cfg(feature = "web")]
 use easl::web_bundle::{
-  COMPILER_RUNTIME_FILES, PROGRAM_DATA_FILE, PROGRAM_JS_FILE, RUNTIME_FILES,
-  RUNTIME_SUPPORT_FILES, bundle_program, bundle_program_sources,
+  COMPILER_WEB_RUNTIME, PROGRAM_DATA_FILE, PROGRAM_JS_FILE,
+  RUNTIME_SUPPORT_FILES, WEB_RUNTIME, bundle_program, bundle_program_sources,
 };
 use notify::{
   Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
@@ -628,26 +628,6 @@ fn compile_web(
   output: Option<PathBuf>,
   build: WebBuild,
 ) -> Result<(), String> {
-  /// The runtime that runs precompiled programs, and the one that compiles
-  /// programs from their sources, as `build.rs` built them.
-  const RUNTIMES: [(&str, &[u8]); 4] = [
-    (
-      RUNTIME_FILES[0],
-      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web.js")),
-    ),
-    (
-      RUNTIME_FILES[1],
-      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_bg.wasm")),
-    ),
-    (
-      COMPILER_RUNTIME_FILES[0],
-      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_compiler.js")),
-    ),
-    (
-      COMPILER_RUNTIME_FILES[1],
-      include_bytes!(concat!(env!("OUT_DIR"), "/easl_web_compiler_bg.wasm")),
-    ),
-  ];
   println!("Compiling {} for the web...", input.display());
   let failed = |e| format!("Compilation failed due to errors:\n\n{e}");
   let (index_html, program_files, runtime_files): (_, Vec<(&str, Vec<u8>)>, _) =
@@ -663,7 +643,7 @@ fn compile_web(
             ),
             (PROGRAM_DATA_FILE, bundle.program_data),
           ],
-          &RUNTIMES[..2],
+          WEB_RUNTIME.to_vec(),
         )
       }
       WebBuild::FromSources => {
@@ -671,7 +651,7 @@ fn compile_web(
         (
           bundle.index_html,
           vec![(PROGRAM_JS_FILE, bundle.program_js.into_bytes())],
-          &RUNTIMES[..],
+          [WEB_RUNTIME, COMPILER_WEB_RUNTIME].concat(),
         )
       }
     };
