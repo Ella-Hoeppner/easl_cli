@@ -16,10 +16,10 @@
 (defn audio []: f32
   (= phase
      (-> phase
-         (+ (* 220
+         (+ (* 110
                (/ (sample-rate))
-               (pow 1.01
-                    (osc (* (audio-time) 9.)))))
+               (pow 1.025
+                    (osc (* (audio-time) 6.)))))
          (% 1.)))
   (let [raw-sample (* (sympow (osc (+ phase
                                       (* 0.5
@@ -37,4 +37,3 @@
 (defn main []
   (start-audio audio)
   (spawn-window (fn [] ())))
-

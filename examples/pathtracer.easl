@@ -243,48 +243,41 @@
           (< i max-bounces)
           (+= i 1)]
       (match (raymarch scene-sdf ray inside)
-        (Some surface-pos) (let [normal (normalize
-                                          (gradient scene-sdf surface-pos))
-                                 surface (get-surface surface-pos)
-                                 refraction-dir (if inside
-                                                  (do (= inside false)
-                                                      (Some ray.dir))
-                                                  (if (or
-                                                        inside
-                                                        (<
-                                                          (rand)
-                                                          surface.transparency))
-                                                    (let [dir (refract
-                                                                ray.dir
-                                                                normal
-                                                                (if inside
-                                                                  surface.index-of-refraction
-                                                                  (/
-                                                                    surface.index-of-refraction)))]
-                                                      (if (all
-                                                            (== dir (vec3f 0.)))
-                                                        None
-                                                        (do (= inside
-                                                               (! inside))
-                                                            (Some dir))))
-                                                    None))]
-                             (+= accumulated-color
-                                 (* (* tint surface.luminosity)
-                                    (-> (dot normal ray.dir) -)))
-                             (*= tint surface.color)
-                             (= ray
-                                (Ray
-                                  surface-pos
-                                  (match refraction-dir
-                                    (Some refraction-dir) refraction-dir
-                                    None (let [reflection-dir (reflect ray.dir
-                                                                       normal)
-                                               diffuse-dir (normalize
-                                                             (+ reflection-dir
-                                                                (rand-sphere)))]
-                                           (mix diffuse-dir
-                                                reflection-dir
-                                                surface.specularity))))))
+        (Some surface-pos)
+         (let [normal (normalize (gradient scene-sdf surface-pos))
+               surface (get-surface surface-pos)
+               refraction-dir (if inside
+                                (do (= inside false)
+                                    (Some ray.dir))
+                                (if (or inside
+                                        (< (rand) surface.transparency))
+                                  (let [dir
+                                         (refract
+                                           ray.dir
+                                           normal
+                                           (if inside
+                                             surface.index-of-refraction
+                                             (/ surface.index-of-refraction)))]
+                                    (if (all (== dir (vec3f 0.)))
+                                      None
+                                      (do (= inside (! inside))
+                                          (Some dir))))
+                                  None))]
+           (+= accumulated-color
+               (* (* tint surface.luminosity)
+                  (-> (dot normal ray.dir) -)))
+           (*= tint surface.color)
+           (= ray
+              (Ray surface-pos
+                   (match refraction-dir
+                     (Some refraction-dir) refraction-dir
+                     None
+                      (let [reflection-dir (reflect ray.dir normal)
+                            diffuse-dir (normalize
+                                          (+ reflection-dir (rand-sphere)))]
+                        (mix diffuse-dir
+                             reflection-dir
+                             surface.specularity))))))
         None (do (+= accumulated-color
                      (* tint (skybox ray.dir)))
                  (break))))
@@ -427,4 +420,3 @@
                     grid-fragment
                     3)
                   (+= frame-index 1))))
-

@@ -266,10 +266,10 @@
 
 @cpu
 (defn main []: ()
-  (let [fundamental-state: vec2f (vec2f 0.)
-        volume-state: vec2f (vec2f 0.)
-        secondary-synth-state: [2: f32] (zeroed-array)
-        main-synth-state: [2: f32] (zeroed-array)]
+  (let [@var fundamental-state: vec2f (vec2f 0.)
+        @var volume-state: vec2f (vec2f 0.)
+        @var secondary-synth-state: [2: f32] (zeroed-array)
+        @var main-synth-state: [2: f32] (zeroed-array)]
     (start-audio
       (fn []
         (let [dt (/ (sample-rate))
@@ -383,4 +383,3 @@
                          (osc (if (== i 0)
                                 t
                                 (state (- i 1)))))))))))
-

@@ -1,3 +1,5 @@
+; uses the jumpflood method to compute a live voronoi diagram and delaunay
+; triangulation of a series of moving points
 (def TAU: f32
      6.28318530718)
 
@@ -223,8 +225,8 @@
                    (all (>= offset-coords (vec2i 0i))))
           (let [other-seed (.x (grid (coords->grid-index offset-coords)))]
             (when (!= base-seed other-seed)
-              (let [current-adjacency-count (atomic-load
-                                              (adjacency-counts base-seed))
+              (let [current-adjacency-count
+                     (atomic-load (adjacency-counts base-seed))
                     @var already-adjacent false]
                 (for [i2
                       0u
@@ -429,4 +431,3 @@
                     (* 6 seed-count))
                   (print (/ (window-delta-time)))
                   (+= frame-index 1))))
-

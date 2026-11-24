@@ -94,4 +94,3 @@
                      (vec2f (window-resolution)))
                   (= time (+ time (/ 120.)))
                   (dispatch-render-shaders vertex fragment 3))))
-

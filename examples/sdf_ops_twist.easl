@@ -95,4 +95,3 @@
                      (+ 5.
                         (* 5. (cos (* 3. (window-time))))))
                   (dispatch-render-shaders vertex fragment 3))))
-

@@ -1,21 +1,32 @@
 [package]
 name = "easl_cli"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
+rust-version = "1.90"
+description = "CLI for the easl compiler toolchain"
+license = "MIT"
+repository = "https://github.com/Ella-Hoeppner/easl_cli"
+homepage = "https://easl-lang.org"
+readme = "README.md"
+keywords = ["easl", "shader", "wgsl", "webgpu", "cli"]
+categories = ["command-line-utilities", "compilers", "graphics"]
 
 [[bin]]
 name = "easl"
 path = "src/main.rs"
 
 [features]
-default = ["interpreter", "web"]
+default = ["interpreter", "video", "web"]
 interpreter = ["easl/window"]
+# `load-video` and the other video builtins, decoding through the `ffmpeg`
+# binary, which must be on the PATH when a program loads a video.
+video = ["easl/video"]
 # `easl compile --web`, with easl's web runtime embedded (easl's
 # `web-runtime` feature).
 web = ["easl/web-runtime"]
 
 [dependencies]
-easl = { git = "https://github.com/Ella-Hoeppner/easl", features = ["window", "video"] }
+easl = { version = "0.1.0", path = "../easl" }
 clap = { version = "4.0", features = ["derive"] }
 notify = "8.2.0"
 

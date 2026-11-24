@@ -26,4 +26,3 @@
 (defn main []
   (spawn-window (fn []
                   (dispatch-render-shaders vertex fragment (* 3 8)))))
-

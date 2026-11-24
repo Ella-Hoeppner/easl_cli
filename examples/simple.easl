@@ -35,4 +35,3 @@
                      (vec2f (window-resolution)))
                   (+= time 0.01)
                   (dispatch-render-shaders vertex fragment 3))))
-

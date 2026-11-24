@@ -281,4 +281,3 @@
                       particle-fragment
                       (* 6 particle-count))
                   (+= frame-index 1))))
-

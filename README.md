@@ -32,6 +32,7 @@ To check that it works, clone this repository and run `easl run examples/raymarc
 
 **run** - Run a .easl shader as a standalone application
 - `easl run <INPUT>` - Run a single .easl file in a window (the file must have a `@cpu` entry point for this to work)
+- `--entry, -e <NAME>` - The `@cpu` entry point to run, needed when the file has more than one
 - `--watch, -w` - Watch for file changes and hot-reload the shader
 
 ### Examples

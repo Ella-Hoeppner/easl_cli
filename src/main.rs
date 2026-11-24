@@ -31,7 +31,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
-#[command(name = "easl")]
+#[command(name = "easl", version)]
 #[command(about = "Easl compiler")]
 struct Cli {
   #[command(subcommand)]
@@ -66,7 +66,7 @@ enum Command {
     #[arg(long, requires = "web")]
     with_compiler: bool,
   },
-  /// Typecheck a .easl file without comiling
+  /// Typecheck a .easl file without compiling
   Check {
     /// Path of the .easl file or directory to check
     input: PathBuf,
@@ -710,7 +710,7 @@ fn check_single_file(input: PathBuf) -> Result<(), String> {
     }
     Err(error_description) => {
       println!("❌\n{error_description}\n");
-      Err(error_description)
+      Err(format!("Failed to typecheck {}", input.display()))
     }
   }
 }
