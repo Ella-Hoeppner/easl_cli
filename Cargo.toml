@@ -1,6 +1,6 @@
 [package]
 name = "easl_cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 description = "CLI for the easl compiler toolchain"
@@ -26,7 +26,7 @@ video = ["easl/video"]
 web = ["easl/web-runtime"]
 
 [dependencies]
-easl = { version = "0.1.0", path = "../easl" }
+easl = { version = "0.2.0", path = "../easl" }
 clap = { version = "4.0", features = ["derive"] }
 notify = "8.2.0"
 
